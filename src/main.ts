@@ -10,7 +10,11 @@ import {
 import { EditorView } from "@codemirror/view";
 import { AnnotationPaneView, VIEW_TYPE_ANNOTATIONS } from "./pane";
 import { annotationLinePlugin } from "./cm-extension";
-import { lineSyncField, updateLineHeights } from "./spacer";
+import {
+	noteSpacerField,
+	updateNoteSpacers,
+} from "./spacer";
+import type { SpacerEntry } from "./spacer";
 import { generateId, ANCHOR_RE } from "./anchor";
 import {
 	getSidecarPath,
@@ -34,7 +38,7 @@ export default class MarginNotesPlugin extends Plugin {
 	/** Link toggle button element. */
 	private splitLinkBtn: HTMLElement | null = null;
 	/** Debounce timer for line-height recalculation. */
-	private lineHeightTimer: number | null = null;
+	private spacerTimer: number | null = null;
 	/** Cached source lines for detecting insertions/deletions. */
 	private cachedSourceLines: string[] | null = null;
 	/** Guard to prevent recursive notes edits. */
@@ -53,7 +57,7 @@ export default class MarginNotesPlugin extends Plugin {
 
 		// ── CM6 extensions ─────────────────────────────────────
 		this.registerEditorExtension(annotationLinePlugin);
-		this.registerEditorExtension(lineSyncField);
+		this.registerEditorExtension(noteSpacerField);
 
 		// ── Reading View post-processor ────────────────────────
 		this.registerMarkdownPostProcessor((el, ctx) => {
@@ -137,7 +141,7 @@ export default class MarginNotesPlugin extends Plugin {
 					this.scrollSync.attach();
 				}
 				if (this.splitLeaf && this.splitSyncEnabled) {
-					this.scheduleLineHeightRecalc();
+					this.scheduleSpacerRecalc();
 					setTimeout(() => this.attachSplitSync(), 350);
 				}
 			})
@@ -146,7 +150,7 @@ export default class MarginNotesPlugin extends Plugin {
 		this.registerEvent(
 			this.app.workspace.on("resize", () => {
 				if (this.splitLeaf && this.splitSyncEnabled) {
-					this.scheduleLineHeightRecalc();
+					this.scheduleSpacerRecalc();
 				}
 			})
 		);
@@ -245,7 +249,7 @@ export default class MarginNotesPlugin extends Plugin {
 
 		// 9. Line-height matching + scroll sync (after DOM settles)
 		setTimeout(() => {
-			this.recalculateLineHeights();
+			this.recalculateSpacers();
 			setTimeout(() => this.attachSplitSync(), 100);
 		}, 300);
 	}
@@ -260,7 +264,7 @@ export default class MarginNotesPlugin extends Plugin {
 			const cv = this.getCmView(this.splitLeaf);
 			if (cv) {
 				cv.dispatch({
-					effects: updateLineHeights.of([]),
+					effects: updateNoteSpacers.of([]),
 				});
 			}
 			this.splitLeaf.detach();
@@ -342,20 +346,22 @@ export default class MarginNotesPlugin extends Plugin {
 		}
 	}
 
-	private scheduleLineHeightRecalc(): void {
-		if (this.lineHeightTimer)
-			window.clearTimeout(this.lineHeightTimer);
-		this.lineHeightTimer = window.setTimeout(() => {
-			this.lineHeightTimer = null;
-			this.recalculateLineHeights();
+	private scheduleSpacerRecalc(): void {
+		if (this.spacerTimer)
+			window.clearTimeout(this.spacerTimer);
+		this.spacerTimer = window.setTimeout(() => {
+			this.spacerTimer = null;
+			this.recalculateSpacers();
 		}, 250);
 	}
 
 	/**
-	 * Measure each source line's height and set min-height on
-	 * the corresponding notes line so they align visually.
+	 * Insert block spacer widgets before each note group so its top
+	 * aligns with the corresponding source line. If a note overflows
+	 * past the next note's target position, the next spacer is 0 and
+	 * the note starts immediately after — alignment resumes downstream.
 	 */
-	private recalculateLineHeights(): void {
+	private recalculateSpacers(): void {
 		if (!this.splitLeaf || !this.splitSourceLeaf) return;
 		if (!this.splitSyncEnabled) return;
 
@@ -363,19 +369,63 @@ export default class MarginNotesPlugin extends Plugin {
 		const notesCV = this.getCmView(this.splitLeaf);
 		if (!sourceCV || !notesCV) return;
 
-		const sourceDoc = sourceCV.state.doc;
-		const heights: number[] = [];
+		// 1. Clear existing spacers so measurements are "natural"
+		notesCV.dispatch({ effects: updateNoteSpacers.of([]) });
+		notesCV.dom.getBoundingClientRect(); // force reflow
 
-		for (let i = 1; i <= sourceDoc.lines; i++) {
-			const block = sourceCV.lineBlockAt(
-				sourceDoc.line(i).from
-			);
-			heights.push(block.height);
+		const notesDoc = notesCV.state.doc;
+		const sourceDoc = sourceCV.state.doc;
+
+		// 2. Find note groups (contiguous non-blank lines)
+		const groups: number[] = []; // start line numbers (1-based)
+		let inGroup = false;
+		for (let i = 1; i <= notesDoc.lines; i++) {
+			const text = notesDoc.line(i).text;
+			if (text.trim() !== "") {
+				if (!inGroup) {
+					groups.push(i);
+					inGroup = true;
+				}
+			} else {
+				inGroup = false;
+			}
 		}
 
-		notesCV.dispatch({
-			effects: updateLineHeights.of(heights),
-		});
+		if (groups.length === 0) return;
+
+		// 3. Calculate spacer heights iteratively
+		const entries: SpacerEntry[] = [];
+		let accumulated = 0;
+
+		for (const startLine of groups) {
+			// Source line this note is tied to
+			const srcLine = Math.min(startLine, sourceDoc.lines);
+			const targetY = sourceCV.lineBlockAt(
+				sourceDoc.line(srcLine).from
+			).top;
+
+			// Note's natural position (without spacers)
+			const naturalY = notesCV.lineBlockAt(
+				notesDoc.line(startLine).from
+			).top;
+
+			// Where it would be with all previous spacers
+			const currentY = naturalY + accumulated;
+
+			// Push down to align, or 0 if previous note overflowed
+			const spacer = Math.max(0, targetY - currentY);
+
+			if (spacer > 0) {
+				entries.push({
+					pos: notesDoc.line(startLine).from,
+					height: spacer,
+				});
+				accumulated += spacer;
+			}
+		}
+
+		// 4. Apply
+		notesCV.dispatch({ effects: updateNoteSpacers.of(entries) });
 	}
 
 	// ── Edit tracking (line sync) ──────────────────────────────
@@ -414,7 +464,7 @@ export default class MarginNotesPlugin extends Plugin {
 			this.cachedNotesLineCount = nv.editor.lineCount();
 		}
 
-		this.scheduleLineHeightRecalc();
+		this.scheduleSpacerRecalc();
 	}
 
 	/**
@@ -437,7 +487,7 @@ export default class MarginNotesPlugin extends Plugin {
 			this.padRemovedNotesLines(editor, -delta);
 		}
 
-		this.scheduleLineHeightRecalc();
+		this.scheduleSpacerRecalc();
 	}
 
 	/**
@@ -646,7 +696,7 @@ export default class MarginNotesPlugin extends Plugin {
 					"aria-label",
 					"Scroll sync (linked)"
 				);
-				this.recalculateLineHeights();
+				this.recalculateSpacers();
 				setTimeout(() => this.attachSplitSync(), 100);
 			} else {
 				setIcon(btn, "unlink");
@@ -662,7 +712,7 @@ export default class MarginNotesPlugin extends Plugin {
 					: null;
 				if (cv) {
 					cv.dispatch({
-						effects: updateLineHeights.of([]),
+						effects: updateNoteSpacers.of([]),
 					});
 				}
 			}
@@ -1071,7 +1121,7 @@ export default class MarginNotesPlugin extends Plugin {
 
 		// Split view: recalculate line heights when source changes
 		if (this.splitLeaf && this.splitSyncEnabled) {
-			this.scheduleLineHeightRecalc();
+			this.scheduleSpacerRecalc();
 		}
 	}
 

@@ -1,36 +1,64 @@
 /**
- * Per-line height matching for split view.
+ * Block spacer widgets for the notes editor in split view.
  *
- * Sets min-height on each line in the notes editor so it matches the
- * height of the corresponding line in the source editor.  This keeps
- * the two panes visually aligned: line N on the left occupies the
- * same vertical space as line N on the right.
+ * Inserts invisible block elements before the first line of each note
+ * group (contiguous non-blank lines). The spacer height is calculated
+ * so the top of the note aligns with the top of its corresponding
+ * source line. If a note overflows past where the next note should
+ * start, the next spacer is 0 and the note comes right after —
+ * alignment resumes as soon as there's room.
  */
 
 import {
 	StateField,
 	StateEffect,
 	RangeSetBuilder,
-	Text,
 } from "@codemirror/state";
 import {
 	Decoration,
 	DecorationSet,
 	EditorView,
+	WidgetType,
 } from "@codemirror/view";
 
-/** Dispatch to the notes editor with an array of source line heights (index 0 = line 1). */
-export const updateLineHeights = StateEffect.define<number[]>();
+export interface SpacerEntry {
+	/** Document character position (line start). */
+	pos: number;
+	/** Spacer height in pixels. */
+	height: number;
+}
 
-export const lineSyncField = StateField.define<DecorationSet>({
+/** Dispatch to the notes editor with calculated spacer entries. */
+export const updateNoteSpacers =
+	StateEffect.define<SpacerEntry[]>();
+
+class SpacerWidget extends WidgetType {
+	constructor(readonly height: number) {
+		super();
+	}
+	eq(other: SpacerWidget): boolean {
+		return this.height === other.height;
+	}
+	toDOM(): HTMLElement {
+		const el = document.createElement("div");
+		el.className = "margin-notes-spacer";
+		el.style.height = `${this.height}px`;
+		return el;
+	}
+	get estimatedHeight(): number {
+		return this.height;
+	}
+}
+
+export const noteSpacerField = StateField.define<DecorationSet>({
 	create() {
 		return Decoration.none;
 	},
 
 	update(value, tr) {
 		for (const e of tr.effects) {
-			if (e.is(updateLineHeights)) {
-				return buildLineDecos(tr.state.doc, e.value);
+			if (e.is(updateNoteSpacers)) {
+				return buildDecos(e.value);
 			}
 		}
 		return tr.docChanged ? value.map(tr.changes) : value;
@@ -39,23 +67,21 @@ export const lineSyncField = StateField.define<DecorationSet>({
 	provide: (f) => EditorView.decorations.from(f),
 });
 
-function buildLineDecos(doc: Text, heights: number[]): DecorationSet {
-	if (heights.length === 0) return Decoration.none;
+function buildDecos(entries: SpacerEntry[]): DecorationSet {
+	if (entries.length === 0) return Decoration.none;
 
 	const builder = new RangeSetBuilder<Decoration>();
-	const n = Math.min(doc.lines, heights.length);
+	const sorted = [...entries].sort((a, b) => a.pos - b.pos);
 
-	for (let i = 0; i < n; i++) {
-		const h = heights[i];
-		if (h > 0) {
-			const line = doc.line(i + 1);
+	for (const { pos, height } of sorted) {
+		if (height > 0) {
 			builder.add(
-				line.from,
-				line.from,
-				Decoration.line({
-					attributes: {
-						style: `min-height: ${h}px; box-sizing: border-box;`,
-					},
+				pos,
+				pos,
+				Decoration.widget({
+					widget: new SpacerWidget(height),
+					block: true,
+					side: -1, // before the line
 				})
 			);
 		}
