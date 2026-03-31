@@ -129,7 +129,9 @@ export default class MarginNotesPlugin extends Plugin {
 					this.scrollSync.attach();
 				}
 				if (this.splitLeaf && this.splitSyncEnabled) {
+					// Scroll containers change on mode switch — reattach
 					this.scheduleSpacerRecalc();
+					setTimeout(() => this.attachSplitSync(), 350);
 				}
 			})
 		);
@@ -578,11 +580,61 @@ export default class MarginNotesPlugin extends Plugin {
 	}
 
 	scrollSourceToAnchor(anchorId: string): void {
+		// 1. If the element is already rendered in the DOM, scroll directly
 		const el = this.findSourceElement(anchorId);
-		if (!el) return;
-		el.scrollIntoView({ behavior: "smooth", block: "center" });
-		el.classList.add("margin-notes-flash");
-		setTimeout(() => el.classList.remove("margin-notes-flash"), 1500);
+		if (el) {
+			el.scrollIntoView({ behavior: "smooth", block: "center" });
+			this.flashElement(el);
+			return;
+		}
+
+		// 2. Element is off-screen — find the source view and scroll via editor API
+		const mdView = this.getSourceMarkdownView();
+		if (!mdView) return;
+
+		const text = mdView.editor.getValue();
+		const lines = text.split("\n");
+		let anchorLine = -1;
+		for (let i = 0; i < lines.length; i++) {
+			if (lines[i].includes(`<!-- ann:${anchorId} -->`)) {
+				anchorLine = i;
+				break;
+			}
+		}
+		if (anchorLine < 0) return;
+
+		const mode = mdView.getMode();
+		if (mode === "source") {
+			// Live Preview / Source mode: use CM6 scrollIntoView
+			const cmView = this.getCmView(mdView.leaf);
+			if (cmView) {
+				const pos = cmView.state.doc.line(anchorLine + 1).from;
+				cmView.dispatch({
+					effects: EditorView.scrollIntoView(pos, {
+						y: "center",
+					}),
+				});
+			}
+		} else {
+			// Reading View: approximate scroll by line fraction
+			const scrollEl = mdView.containerEl.querySelector(
+				".markdown-preview-view"
+			) as HTMLElement | null;
+			if (scrollEl) {
+				const frac = anchorLine / Math.max(lines.length, 1);
+				scrollEl.scrollTop =
+					frac * (scrollEl.scrollHeight - scrollEl.clientHeight);
+			}
+		}
+
+		// 3. After the viewport renders the target, highlight it
+		setTimeout(() => {
+			const el2 = this.findSourceElement(anchorId);
+			if (el2) {
+				el2.scrollIntoView({ behavior: "smooth", block: "center" });
+				this.flashElement(el2);
+			}
+		}, 250);
 	}
 
 	scrollPaneToAnchor(anchorId: string): void {
@@ -601,6 +653,34 @@ export default class MarginNotesPlugin extends Plugin {
 				`[data-ann-id="${anchorId}"]`
 			) as HTMLElement | null;
 			if (el) return el;
+		}
+		return null;
+	}
+
+	private flashElement(el: HTMLElement): void {
+		el.classList.add("margin-notes-flash");
+		setTimeout(() => el.classList.remove("margin-notes-flash"), 1500);
+	}
+
+	/** Find the MarkdownView for the source file (not a sidecar). */
+	private getSourceMarkdownView(): MarkdownView | null {
+		const pane = this.getAnnotationPane();
+		const targetPath = pane?.getCurrentSourcePath();
+
+		// Try to find the specific source file first
+		if (targetPath) {
+			for (const leaf of this.app.workspace.getLeavesOfType(
+				"markdown"
+			)) {
+				const v = leaf.view as MarkdownView;
+				if (v.file?.path === targetPath) return v;
+			}
+		}
+
+		// Fall back to any non-sidecar markdown view
+		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+			const v = leaf.view as MarkdownView;
+			if (v.file && !isSidecarFile(v.file.path)) return v;
 		}
 		return null;
 	}

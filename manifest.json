@@ -1,7 +1,7 @@
 {
 	"id": "margin-notes",
 	"name": "Margin Notes",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"minAppVersion": "1.5.0",
 	"description": "Add margin annotations to documents in a synced side pane, with scroll sync and HTML export",
 	"author": "Martin Juskelis",
