@@ -35,6 +35,10 @@ export default class MarginNotesPlugin extends Plugin {
 	private splitLinkBtn: HTMLElement | null = null;
 	/** Debounce timer for line-height recalculation. */
 	private lineHeightTimer: number | null = null;
+	/** Cached source lines for detecting insertions/deletions. */
+	private cachedSourceLines: string[] | null = null;
+	/** Guard to prevent recursive notes edits. */
+	private applyingLineDiff = false;
 
 	async onload(): Promise<void> {
 		this.scrollSync = new ScrollSync(this);
@@ -144,6 +148,17 @@ export default class MarginNotesPlugin extends Plugin {
 				}
 			})
 		);
+
+		// Track source edits to mirror line insertions/deletions to notes
+		this.registerEvent(
+			// @ts-ignore — editor-change event typing
+			this.app.workspace.on(
+				"editor-change",
+				(editor: any, info: any) => {
+					this.onSourceEditorChange(editor, info);
+				}
+			)
+		);
 	}
 
 	onunload(): void {
@@ -216,11 +231,14 @@ export default class MarginNotesPlugin extends Plugin {
 		this.splitSourceLeaf = sourceLeaf;
 		await this.splitLeaf.openFile(notesFile);
 
-		// 7. Add link toggle button
+		// 7. Cache source lines for edit tracking
+		this.cachedSourceLines = sourceText.split("\n");
+
+		// 8. Add link toggle button
 		this.splitSyncEnabled = true;
 		this.addLinkToggle();
 
-		// 8. Line-height matching + scroll sync (after DOM settles)
+		// 9. Line-height matching + scroll sync (after DOM settles)
 		setTimeout(() => {
 			this.recalculateLineHeights();
 			setTimeout(() => this.attachSplitSync(), 100);
@@ -244,6 +262,7 @@ export default class MarginNotesPlugin extends Plugin {
 			this.splitLeaf = null;
 		}
 		this.splitSourceLeaf = null;
+		this.cachedSourceLines = null;
 		this.scrollSync.detach();
 	}
 
@@ -351,6 +370,144 @@ export default class MarginNotesPlugin extends Plugin {
 		notesCV.dispatch({
 			effects: updateLineHeights.of(heights),
 		});
+	}
+
+	// ── Source edit tracking (line sync) ───────────────────────
+
+	/**
+	 * Called on every keystroke in any editor. Checks if the source
+	 * file's line count changed, and if so, mirrors the line
+	 * insertion/deletion to the notes file.
+	 */
+	private onSourceEditorChange(editor: any, info: any): void {
+		if (!this.splitLeaf || !this.splitSourceLeaf) return;
+		if (!this.cachedSourceLines) return;
+		if (this.applyingLineDiff) return;
+
+		// Only process the tracked source file
+		const sourceFile = (this.splitSourceLeaf.view as MarkdownView)
+			.file;
+		if (!sourceFile || info?.file?.path !== sourceFile.path) return;
+
+		// O(1) check — skip if line count hasn't changed
+		const newLineCount = editor.lineCount();
+		if (newLineCount === this.cachedSourceLines.length) return;
+
+		// Line count changed — diff and apply
+		const newLines = (editor.getValue() as string).split("\n");
+		this.applyLineDiff(this.cachedSourceLines, newLines);
+		this.cachedSourceLines = newLines;
+		this.scheduleLineHeightRecalc();
+	}
+
+	/**
+	 * Diff old vs new source lines and apply matching changes
+	 * to the notes editor. Insertions add blank lines; deletions
+	 * remove only blank lines (content is never lost).
+	 */
+	private applyLineDiff(
+		oldLines: string[],
+		newLines: string[]
+	): void {
+		if (!this.splitLeaf) return;
+		const notesView = this.splitLeaf.view;
+		if (!(notesView instanceof MarkdownView)) return;
+		const notesEditor = notesView.editor;
+
+		const change = this.diffLines(oldLines, newLines);
+		if (!change) return;
+
+		const { position, removed, added } = change;
+		this.applyingLineDiff = true;
+
+		try {
+			if (added > removed) {
+				// Lines inserted in source → insert blank lines in notes
+				const count = added - removed;
+				const insertAt = Math.min(
+					position + removed,
+					notesEditor.lineCount()
+				);
+				notesEditor.replaceRange(
+					"\n".repeat(count),
+					{ line: insertAt, ch: 0 }
+				);
+			} else if (removed > added) {
+				// Lines deleted from source → remove blank notes lines
+				const count = removed - added;
+				const deleteAt = position + added;
+
+				// Delete from bottom up so indices stay valid
+				for (let i = count - 1; i >= 0; i--) {
+					const idx = deleteAt + i;
+					if (idx >= notesEditor.lineCount()) continue;
+
+					const text = notesEditor.getLine(idx);
+					if (text.trim() !== "") continue; // never delete content
+
+					if (idx < notesEditor.lineCount() - 1) {
+						// Delete this line (including its newline)
+						notesEditor.replaceRange(
+							"",
+							{ line: idx, ch: 0 },
+							{ line: idx + 1, ch: 0 }
+						);
+					} else if (idx > 0) {
+						// Last line — remove the newline before it
+						const prev = notesEditor.getLine(idx - 1);
+						notesEditor.replaceRange(
+							"",
+							{ line: idx - 1, ch: prev.length },
+							{ line: idx, ch: text.length }
+						);
+					}
+				}
+			}
+		} finally {
+			this.applyingLineDiff = false;
+		}
+	}
+
+	/**
+	 * Find the single contiguous change between two line arrays.
+	 * Returns the position and size of the changed region, or null
+	 * if no structural change (only content edits within lines).
+	 */
+	private diffLines(
+		oldLines: string[],
+		newLines: string[]
+	): { position: number; removed: number; added: number } | null {
+		// Common prefix
+		let top = 0;
+		const minLen = Math.min(oldLines.length, newLines.length);
+		while (
+			top < minLen &&
+			oldLines[top] === newLines[top]
+		) {
+			top++;
+		}
+
+		// Common suffix
+		let oldBot = oldLines.length - 1;
+		let newBot = newLines.length - 1;
+		while (
+			oldBot > top &&
+			newBot > top &&
+			oldLines[oldBot] === newLines[newBot]
+		) {
+			oldBot--;
+			newBot--;
+		}
+
+		// Clamp
+		if (oldBot < top) oldBot = top - 1;
+		if (newBot < top) newBot = top - 1;
+
+		const removed = oldBot - top + 1;
+		const added = newBot - top + 1;
+		if (removed === 0 && added === 0) return null;
+
+		return { position: top, removed, added };
 	}
 
 	// ── Link toggle button ─────────────────────────────────────
