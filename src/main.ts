@@ -3,6 +3,7 @@ import {
 	MarkdownView,
 	TFile,
 	TAbstractFile,
+	WorkspaceLeaf,
 	Notice,
 } from "obsidian";
 import { AnnotationPaneView, VIEW_TYPE_ANNOTATIONS } from "./pane";
@@ -20,6 +21,8 @@ import { exportToHtml } from "./exporter";
 
 export default class MarginNotesPlugin extends Plugin {
 	scrollSync: ScrollSync = null!;
+	/** The leaf holding the sidecar file in split view mode. */
+	private splitLeaf: WorkspaceLeaf | null = null;
 
 	async onload(): Promise<void> {
 		this.scrollSync = new ScrollSync(this);
@@ -71,6 +74,12 @@ export default class MarginNotesPlugin extends Plugin {
 			id: "toggle-pane",
 			name: "Toggle margin notes pane",
 			callback: () => this.togglePane(),
+		});
+
+		this.addCommand({
+			id: "open-split-view",
+			name: "Open side-by-side view",
+			callback: () => this.openSplitView(),
 		});
 
 		this.addCommand({
@@ -278,6 +287,105 @@ export default class MarginNotesPlugin extends Plugin {
 		return leaves.length
 			? (leaves[0].view as AnnotationPaneView)
 			: null;
+	}
+
+	// ── Split view ─────────────────────────────────────────────
+
+	async openSplitView(): Promise<void> {
+		// Find the source file — try active view, fall back to any markdown leaf
+		let sourceLeaf: WorkspaceLeaf | null = null;
+		let sourceFile: TFile | null = null;
+
+		const activeView =
+			this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (activeView?.file && !isSidecarFile(activeView.file.path)) {
+			sourceLeaf = activeView.leaf;
+			sourceFile = activeView.file;
+		} else {
+			for (const leaf of this.app.workspace.getLeavesOfType(
+				"markdown"
+			)) {
+				const v = leaf.view as MarkdownView;
+				if (v.file && !isSidecarFile(v.file.path)) {
+					sourceLeaf = leaf;
+					sourceFile = v.file;
+					break;
+				}
+			}
+		}
+
+		if (!sourceLeaf || !sourceFile) {
+			new Notice("Open a document first");
+			return;
+		}
+
+		// Close comments pane if open
+		for (const leaf of this.app.workspace.getLeavesOfType(
+			VIEW_TYPE_ANNOTATIONS
+		)) {
+			leaf.detach();
+		}
+
+		// Close existing split if any
+		this.closeSplitView();
+
+		// Get or create the sidecar file
+		const sidecarPath = getSidecarPath(sourceFile.path);
+		let sidecarFile =
+			this.app.vault.getAbstractFileByPath(sidecarPath);
+		if (!(sidecarFile instanceof TFile)) {
+			await this.saveSidecar(sidecarPath, {
+				source: sourceFile.path,
+				annotations: [],
+			});
+			sidecarFile =
+				this.app.vault.getAbstractFileByPath(sidecarPath);
+		}
+		if (!(sidecarFile instanceof TFile)) return;
+
+		// Focus the source leaf first so the split appears beside it
+		this.app.workspace.setActiveLeaf(sourceLeaf, { focus: true });
+
+		// Open sidecar in a vertical split to the right
+		this.splitLeaf = this.app.workspace.createLeafBySplit(
+			sourceLeaf,
+			"vertical"
+		);
+		await this.splitLeaf.openFile(sidecarFile);
+
+		// Set up scroll sync after the DOM settles
+		const self = this;
+		setTimeout(() => {
+			if (!self.splitLeaf || !sourceLeaf) return;
+			const srcEl = self.getLeafScrollContainer(sourceLeaf);
+			const scEl = self.getLeafScrollContainer(self.splitLeaf);
+			if (srcEl && scEl) {
+				self.scrollSync.attachToElements(srcEl, scEl);
+			}
+		}, 250);
+	}
+
+	closeSplitView(): void {
+		if (this.splitLeaf) {
+			this.splitLeaf.detach();
+			this.splitLeaf = null;
+			this.scrollSync.detach();
+		}
+	}
+
+	private getLeafScrollContainer(
+		leaf: WorkspaceLeaf
+	): HTMLElement | null {
+		if (!(leaf.view instanceof MarkdownView)) return null;
+		const mode = (leaf.view as MarkdownView).getMode();
+		if (mode === "preview") {
+			return leaf.view.containerEl.querySelector(
+				".markdown-preview-view"
+			) as HTMLElement | null;
+		}
+		return leaf.view.containerEl.querySelector(
+			".cm-scroller"
+		) as HTMLElement | null;
 	}
 
 	// ── Source highlighting ────────────────────────────────────

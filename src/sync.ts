@@ -48,6 +48,19 @@ export class ScrollSync {
 		});
 	}
 
+	/** Attach to two explicit scroll containers (for split view mode). */
+	attachToElements(sourceEl: HTMLElement, paneEl: HTMLElement): void {
+		this.detach();
+		this.sourceEl = sourceEl;
+		this.paneEl = paneEl;
+		this.sourceEl.addEventListener("scroll", this.onSourceScroll, {
+			passive: true,
+		});
+		this.paneEl.addEventListener("scroll", this.onPaneScroll, {
+			passive: true,
+		});
+	}
+
 	/** Remove all scroll listeners. */
 	detach(): void {
 		if (this.sourceEl) {

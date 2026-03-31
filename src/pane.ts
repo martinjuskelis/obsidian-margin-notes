@@ -56,8 +56,19 @@ export class AnnotationPaneView extends ItemView {
 		const header = root.createDiv("margin-notes-header");
 		header.createSpan({ text: "Margin Notes", cls: "margin-notes-title" });
 
-		const addBtn = header.createEl("button", {
-			cls: "margin-notes-add-btn clickable-icon",
+		const buttons = header.createDiv("margin-notes-header-buttons");
+
+		const splitBtn = buttons.createEl("button", {
+			cls: "margin-notes-header-btn clickable-icon",
+			attr: { "aria-label": "Open side-by-side view" },
+		});
+		setIcon(splitBtn, "columns-2");
+		splitBtn.addEventListener("click", () =>
+			this.plugin.openSplitView()
+		);
+
+		const addBtn = buttons.createEl("button", {
+			cls: "margin-notes-header-btn clickable-icon",
 			attr: { "aria-label": "Add margin note" },
 		});
 		setIcon(addBtn, "plus");

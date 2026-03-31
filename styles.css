@@ -26,10 +26,15 @@
 	letter-spacing: 0.05em;
 }
 
-.margin-notes-add-btn {
+.margin-notes-header-buttons {
+	display: flex;
+	gap: 2px;
+}
+
+.margin-notes-header-btn {
 	color: var(--text-muted);
 }
-.margin-notes-add-btn:hover {
+.margin-notes-header-btn:hover {
 	color: var(--text-normal);
 }
 

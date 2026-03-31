@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-margin-notes",
-	"version": "0.1.1",
+	"version": "0.2.0",
 	"description": "Margin notes plugin for Obsidian",
 	"main": "main.js",
 	"scripts": {
