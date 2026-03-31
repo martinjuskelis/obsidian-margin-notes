@@ -64,16 +64,7 @@ export class AnnotationPaneView extends ItemView {
 		});
 		setIcon(splitBtn, "columns-2");
 		splitBtn.addEventListener("click", () =>
-			this.plugin.openSplitView()
-		);
-
-		const addBtn = buttons.createEl("button", {
-			cls: "margin-notes-header-btn clickable-icon",
-			attr: { "aria-label": "Add margin note" },
-		});
-		setIcon(addBtn, "plus");
-		addBtn.addEventListener("click", () =>
-			this.plugin.addAnnotationAtCursor()
+			this.plugin.openSplit()
 		);
 
 		// ── Scrollable card container ──────────────────────────
