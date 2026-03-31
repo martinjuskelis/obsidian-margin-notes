@@ -11,8 +11,6 @@ import {
 import { EditorView } from "@codemirror/view";
 import { AnnotationPaneView, VIEW_TYPE_ANNOTATIONS } from "./pane";
 import { annotationLinePlugin } from "./cm-extension";
-import { noteSpacerField, updateNoteSpacers } from "./spacer";
-import type { SpacerEntry } from "./spacer";
 import { generateId, ANCHOR_RE } from "./anchor";
 import {
 	getSidecarPath,
@@ -31,7 +29,6 @@ export default class MarginNotesPlugin extends Plugin {
 	private splitSourceLeaf: WorkspaceLeaf | null = null;
 	private splitSyncEnabled = true;
 	private splitLinkBtn: HTMLElement | null = null;
-	private spacerTimer: number | null = null;
 	/** Cached source lines for detecting line insertions/deletions. */
 	private cachedSourceLines: string[] | null = null;
 	/** Cached notes line count for detecting Enter presses. */
@@ -48,7 +45,6 @@ export default class MarginNotesPlugin extends Plugin {
 			(leaf) => new AnnotationPaneView(leaf, this)
 		);
 		this.registerEditorExtension(annotationLinePlugin);
-		this.registerEditorExtension(noteSpacerField);
 
 		// ── Reading View post-processor ────────────────────────
 		this.registerMarkdownPostProcessor((el, ctx) => {
@@ -135,16 +131,8 @@ export default class MarginNotesPlugin extends Plugin {
 			this.app.workspace.on("layout-change", () => {
 				if (this.getAnnotationPane())
 					this.scrollSync.attach();
-				if (this.splitLeaf && this.splitSyncEnabled) {
-					this.scheduleSpacerRecalc();
-					setTimeout(() => this.attachSplitSync(), 350);
-				}
-			})
-		);
-		this.registerEvent(
-			this.app.workspace.on("resize", () => {
 				if (this.splitLeaf && this.splitSyncEnabled)
-					this.scheduleSpacerRecalc();
+					setTimeout(() => this.attachSplitSync(), 350);
 			})
 		);
 	}
@@ -228,13 +216,10 @@ export default class MarginNotesPlugin extends Plugin {
 		const nv = this.splitLeaf.view as MarkdownView;
 		this.cachedNotesLineCount = nv.editor.lineCount();
 
-		// Link toggle + spacers + sync
+		// Link toggle + sync
 		this.splitSyncEnabled = true;
 		this.addLinkToggle();
-		setTimeout(() => {
-			this.recalculateSpacers();
-			setTimeout(() => this.attachSplitSync(), 100);
-		}, 300);
+		setTimeout(() => this.attachSplitSync(), 300);
 	}
 
 	closeSplitView(): void {
@@ -243,11 +228,6 @@ export default class MarginNotesPlugin extends Plugin {
 			this.splitLinkBtn = null;
 		}
 		if (this.splitLeaf) {
-			const cv = this.getCmView(this.splitLeaf);
-			if (cv)
-				cv.dispatch({
-					effects: updateNoteSpacers.of([]),
-				});
 			this.splitLeaf.detach();
 			this.splitLeaf = null;
 		}
@@ -302,79 +282,6 @@ export default class MarginNotesPlugin extends Plugin {
 	}
 
 	// ── Anchor-based spacer alignment ──────────────────────────
-
-	private scheduleSpacerRecalc(): void {
-		if (this.spacerTimer)
-			window.clearTimeout(this.spacerTimer);
-		this.spacerTimer = window.setTimeout(() => {
-			this.spacerTimer = null;
-			this.recalculateSpacers();
-		}, 250);
-	}
-
-	/**
-	 * Match anchors by ID between source and notes editors, then
-	 * insert block spacer widgets so each note's top aligns with
-	 * its source anchor. Overflow is handled gracefully — the next
-	 * note starts right after with zero gap.
-	 */
-	private recalculateSpacers(): void {
-		if (!this.splitLeaf || !this.splitSourceLeaf) return;
-		if (!this.splitSyncEnabled) return;
-
-		const srcV = this.getCmView(this.splitSourceLeaf);
-		const notV = this.getCmView(this.splitLeaf);
-		if (!srcV || !notV) return;
-
-		// Clear spacers so measurements are "natural"
-		notV.dispatch({ effects: updateNoteSpacers.of([]) });
-		notV.dom.getBoundingClientRect(); // force reflow
-
-		const srcAnchors = this.findAnchorsInDoc(srcV);
-		const notAnchors = this.findAnchorsInDoc(notV);
-
-		const entries: SpacerEntry[] = [];
-		let accumulated = 0;
-
-		for (const na of notAnchors) {
-			const sa = srcAnchors.find((a) => a.id === na.id);
-			if (!sa) continue;
-
-			const targetY = sa.top;
-			const currentY = na.top + accumulated;
-			const spacer = Math.max(0, targetY - currentY);
-
-			if (spacer > 0) {
-				entries.push({ pos: na.pos, height: spacer });
-				accumulated += spacer;
-			}
-		}
-
-		notV.dispatch({ effects: updateNoteSpacers.of(entries) });
-	}
-
-	/** Find all <!-- ann:ID --> anchors in a CM6 editor and return their positions. */
-	private findAnchorsInDoc(
-		view: EditorView
-	): { id: string; top: number; pos: number }[] {
-		const re = /<!-- ann:(\w+) -->/;
-		const doc = view.state.doc;
-		const result: { id: string; top: number; pos: number }[] =
-			[];
-
-		for (let i = 1; i <= doc.lines; i++) {
-			const line = doc.line(i);
-			const m = re.exec(line.text);
-			if (m) {
-				result.push({
-					id: m[1],
-					top: view.lineBlockAt(line.from).top,
-					pos: line.from,
-				});
-			}
-		}
-		return result;
-	}
 
 	// ── Edit tracking (auto-anchor + line sync) ───────────────
 
@@ -452,7 +359,7 @@ export default class MarginNotesPlugin extends Plugin {
 		} finally {
 			this.applyingDiff = false;
 		}
-		this.scheduleSpacerRecalc();
+		this.attachSplitSync();
 	}
 
 	/**
@@ -541,7 +448,7 @@ export default class MarginNotesPlugin extends Plugin {
 			}
 		}
 
-		this.scheduleSpacerRecalc();
+		this.attachSplitSync();
 	}
 
 	/** Check if lineNum is the first non-blank line in its group (needs a new anchor). */
@@ -665,7 +572,7 @@ export default class MarginNotesPlugin extends Plugin {
 					"aria-label",
 					"Scroll sync (linked)"
 				);
-				this.recalculateSpacers();
+				this.attachSplitSync();
 				setTimeout(() => this.attachSplitSync(), 100);
 			} else {
 				setIcon(btn, "unlink");
@@ -676,13 +583,6 @@ export default class MarginNotesPlugin extends Plugin {
 					"Scroll sync (unlinked)"
 				);
 				this.scrollSync.detach();
-				const cv = this.splitLeaf
-					? this.getCmView(this.splitLeaf)
-					: null;
-				if (cv)
-					cv.dispatch({
-						effects: updateNoteSpacers.of([]),
-					});
 			}
 		});
 	}
@@ -818,7 +718,7 @@ export default class MarginNotesPlugin extends Plugin {
 			}
 		}
 
-		this.recalculateSpacers();
+		this.attachSplitSync();
 	}
 
 	// ── Sidecar I/O ────────────────────────────────────────────
@@ -1091,7 +991,7 @@ export default class MarginNotesPlugin extends Plugin {
 
 		// Split view: recalculate spacers when either file changes
 		if (this.splitLeaf && this.splitSyncEnabled)
-			this.scheduleSpacerRecalc();
+			this.attachSplitSync();
 	}
 
 	// ── Export ──────────────────────────────────────────────────
