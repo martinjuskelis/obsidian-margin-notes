@@ -1,47 +1,36 @@
 /**
- * Spacer decorations for the sidecar editor in split view.
+ * Per-line height matching for split view.
  *
- * Inserts invisible block widgets before annotation markers to push
- * annotations down so they align vertically with their corresponding
- * source paragraphs.  Heights are calculated by the plugin and
- * dispatched as a StateEffect.
+ * Sets min-height on each line in the notes editor so it matches the
+ * height of the corresponding line in the source editor.  This keeps
+ * the two panes visually aligned: line N on the left occupies the
+ * same vertical space as line N on the right.
  */
 
-import { StateField, StateEffect, RangeSetBuilder, Text } from "@codemirror/state";
-import { Decoration, DecorationSet, EditorView, WidgetType } from "@codemirror/view";
+import {
+	StateField,
+	StateEffect,
+	RangeSetBuilder,
+	Text,
+} from "@codemirror/state";
+import {
+	Decoration,
+	DecorationSet,
+	EditorView,
+} from "@codemirror/view";
 
-/** Dispatch this to the sidecar editor with a map of anchorId → pixel height. */
-export const updateSpacers = StateEffect.define<Map<string, number>>();
+/** Dispatch to the notes editor with an array of source line heights (index 0 = line 1). */
+export const updateLineHeights = StateEffect.define<number[]>();
 
-class SpacerWidget extends WidgetType {
-	constructor(readonly height: number) {
-		super();
-	}
-	eq(other: SpacerWidget): boolean {
-		return this.height === other.height;
-	}
-	toDOM(): HTMLElement {
-		const el = document.createElement("div");
-		el.className = "margin-notes-spacer";
-		el.style.height = `${this.height}px`;
-		return el;
-	}
-	get estimatedHeight(): number {
-		return this.height;
-	}
-}
-
-const ANCHOR_RE = /<!-- ann:(\w+) -->/;
-
-export const spacerField = StateField.define<DecorationSet>({
+export const lineSyncField = StateField.define<DecorationSet>({
 	create() {
 		return Decoration.none;
 	},
 
 	update(value, tr) {
 		for (const e of tr.effects) {
-			if (e.is(updateSpacers)) {
-				return buildDecorations(tr.state.doc, e.value);
+			if (e.is(updateLineHeights)) {
+				return buildLineDecos(tr.state.doc, e.value);
 			}
 		}
 		return tr.docChanged ? value.map(tr.changes) : value;
@@ -50,30 +39,27 @@ export const spacerField = StateField.define<DecorationSet>({
 	provide: (f) => EditorView.decorations.from(f),
 });
 
-function buildDecorations(
-	doc: Text,
-	heights: Map<string, number>
-): DecorationSet {
-	if (heights.size === 0) return Decoration.none;
+function buildLineDecos(doc: Text, heights: number[]): DecorationSet {
+	if (heights.length === 0) return Decoration.none;
 
 	const builder = new RangeSetBuilder<Decoration>();
-	for (let i = 1; i <= doc.lines; i++) {
-		const line = doc.line(i);
-		const m = ANCHOR_RE.exec(line.text);
-		if (m) {
-			const h = heights.get(m[1]);
-			if (h && h > 0) {
-				builder.add(
-					line.from,
-					line.from,
-					Decoration.widget({
-						widget: new SpacerWidget(h),
-						block: true,
-						side: -1, // insert before the line
-					})
-				);
-			}
+	const n = Math.min(doc.lines, heights.length);
+
+	for (let i = 0; i < n; i++) {
+		const h = heights[i];
+		if (h > 0) {
+			const line = doc.line(i + 1);
+			builder.add(
+				line.from,
+				line.from,
+				Decoration.line({
+					attributes: {
+						style: `min-height: ${h}px; box-sizing: border-box;`,
+					},
+				})
+			);
 		}
 	}
+
 	return builder.finish();
 }
