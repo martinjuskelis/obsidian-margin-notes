@@ -352,6 +352,13 @@ export default class MarginNotesPlugin extends Plugin {
 			leaf.detach();
 		}
 
+		// Collapse right sidebar so it doesn't compete with the split
+		// @ts-ignore — rightSplit is not in public typings but is stable
+		const rightSplit = this.app.workspace.rightSplit;
+		if (rightSplit && !rightSplit.collapsed) {
+			rightSplit.collapse();
+		}
+
 		// Close existing split if any
 		this.closeSplitView();
 
