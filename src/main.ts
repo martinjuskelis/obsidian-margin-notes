@@ -6,14 +6,12 @@ import {
 	WorkspaceLeaf,
 	Notice,
 	setIcon,
+	Platform,
 } from "obsidian";
 import { EditorView } from "@codemirror/view";
 import { AnnotationPaneView, VIEW_TYPE_ANNOTATIONS } from "./pane";
 import { annotationLinePlugin } from "./cm-extension";
-import {
-	noteSpacerField,
-	updateNoteSpacers,
-} from "./spacer";
+import { noteSpacerField, updateNoteSpacers } from "./spacer";
 import type { SpacerEntry } from "./spacer";
 import { generateId, ANCHOR_RE } from "./anchor";
 import {
@@ -29,33 +27,20 @@ import { exportToHtml } from "./exporter";
 
 export default class MarginNotesPlugin extends Plugin {
 	scrollSync: ScrollSync = null!;
-	/** The leaf holding the notes file in split view. */
 	private splitLeaf: WorkspaceLeaf | null = null;
-	/** The source leaf that the split view was opened from. */
 	private splitSourceLeaf: WorkspaceLeaf | null = null;
-	/** Whether scroll sync is active in split mode. */
 	private splitSyncEnabled = true;
-	/** Link toggle button element. */
 	private splitLinkBtn: HTMLElement | null = null;
-	/** Debounce timer for line-height recalculation. */
 	private spacerTimer: number | null = null;
-	/** Cached source lines for detecting insertions/deletions. */
-	private cachedSourceLines: string[] | null = null;
-	/** Guard to prevent recursive notes edits. */
-	private applyingLineDiff = false;
-	/** Cached notes line count for detecting user edits in notes. */
-	private cachedNotesLineCount: number | null = null;
 
 	async onload(): Promise<void> {
 		this.scrollSync = new ScrollSync(this);
 
-		// ── View (comments pane — secondary) ───────────────────
+		// ── Views & extensions ──────────────────────────────────
 		this.registerView(
 			VIEW_TYPE_ANNOTATIONS,
 			(leaf) => new AnnotationPaneView(leaf, this)
 		);
-
-		// ── CM6 extensions ─────────────────────────────────────
 		this.registerEditorExtension(annotationLinePlugin);
 		this.registerEditorExtension(noteSpacerField);
 
@@ -63,11 +48,9 @@ export default class MarginNotesPlugin extends Plugin {
 		this.registerMarkdownPostProcessor((el, ctx) => {
 			const info = ctx.getSectionInfo(el);
 			if (!info) return;
-
 			const sectionLines = info.text
 				.split("\n")
 				.slice(info.lineStart, info.lineEnd + 1);
-
 			for (const line of sectionLines) {
 				const m = ANCHOR_RE.exec(line);
 				if (m) {
@@ -87,9 +70,8 @@ export default class MarginNotesPlugin extends Plugin {
 			id: "add-margin-note",
 			name: "Add margin note",
 			editorCallback: (editor, ctx) => {
-				if (ctx instanceof MarkdownView) {
-					this.addAnnotationFromEditor(ctx);
-				}
+				if (ctx instanceof MarkdownView)
+					this.addAnnotation(ctx);
 			},
 		});
 
@@ -111,7 +93,7 @@ export default class MarginNotesPlugin extends Plugin {
 			callback: () => this.exportCurrentFile(),
 		});
 
-		// ── Ribbon icon ────────────────────────────────────────
+		// ── Ribbon ─────────────────────────────────────────────
 		this.addRibbonIcon(
 			"columns-2",
 			"Toggle margin notes",
@@ -124,46 +106,31 @@ export default class MarginNotesPlugin extends Plugin {
 				this.onActiveLeafChange()
 			)
 		);
-
 		this.registerEvent(
-			this.app.vault.on("rename", (file, oldPath) =>
-				this.onFileRenamed(file, oldPath)
+			this.app.vault.on("rename", (f, old) =>
+				this.onFileRenamed(f, old)
 			)
 		);
-
 		this.registerEvent(
-			this.app.vault.on("modify", (file) => this.onFileModified(file))
+			this.app.vault.on("modify", (f) =>
+				this.onFileModified(f)
+			)
 		);
-
 		this.registerEvent(
 			this.app.workspace.on("layout-change", () => {
-				if (this.getAnnotationPane()) {
+				if (this.getAnnotationPane())
 					this.scrollSync.attach();
-				}
 				if (this.splitLeaf && this.splitSyncEnabled) {
 					this.scheduleSpacerRecalc();
 					setTimeout(() => this.attachSplitSync(), 350);
 				}
 			})
 		);
-
 		this.registerEvent(
 			this.app.workspace.on("resize", () => {
-				if (this.splitLeaf && this.splitSyncEnabled) {
+				if (this.splitLeaf && this.splitSyncEnabled)
 					this.scheduleSpacerRecalc();
-				}
 			})
-		);
-
-		// Track edits in both source and notes to keep lines synced
-		this.registerEvent(
-			// @ts-ignore — editor-change event typing
-			this.app.workspace.on(
-				"editor-change",
-				(editor: any, info: any) => {
-					this.onEditorChange(editor, info);
-				}
-			)
 		);
 	}
 
@@ -174,17 +141,22 @@ export default class MarginNotesPlugin extends Plugin {
 	// ── Toggle (primary action) ────────────────────────────────
 
 	async toggleMarginNotes(): Promise<void> {
-		if (this.splitLeaf) {
-			this.closeSplitView();
+		if (Platform.isMobile) {
+			// Mobile: use the comments pane in the right sidebar
+			await this.toggleCommentsPane();
 		} else {
-			await this.openSplitView();
+			// Desktop: use the split view
+			if (this.splitLeaf) {
+				this.closeSplitView();
+			} else {
+				await this.openSplitView();
+			}
 		}
 	}
 
-	// ── Split view ─────────────────────────────────────────────
+	// ── Split view (desktop) ───────────────────────────────────
 
 	async openSplitView(): Promise<void> {
-		// 1. Find the source file
 		const { leaf: sourceLeaf, file: sourceFile } =
 			this.findSourceLeaf();
 		if (!sourceLeaf || !sourceFile) {
@@ -192,43 +164,34 @@ export default class MarginNotesPlugin extends Plugin {
 			return;
 		}
 
-		// 2. Clean up any existing state
+		// Clean up
 		for (const l of this.app.workspace.getLeavesOfType(
 			VIEW_TYPE_ANNOTATIONS
-		)) {
+		))
 			l.detach();
-		}
 		this.closeSplitView();
 
-		// 3. Collapse right sidebar
+		// Collapse right sidebar
 		// @ts-ignore — rightSplit is stable but not in public typings
 		const rs = this.app.workspace.rightSplit;
 		if (rs && !rs.collapsed) rs.collapse();
 
-		// 4. Get or create the .ann.md notes file
+		// Get or create the .ann.md notes file (anchor format)
 		const notesPath = getSidecarPath(sourceFile.path);
 		let notesFile =
 			this.app.vault.getAbstractFileByPath(notesPath);
-
-		const sourceText = await this.app.vault.cachedRead(sourceFile);
-		const sourceLineCount = sourceText.split("\n").length;
-
 		if (!(notesFile instanceof TFile)) {
-			// Create a new file with matching line count (all blank)
-			const blank =
-				sourceLineCount > 1
-					? "\n".repeat(sourceLineCount - 1)
-					: "";
-			await this.app.vault.create(notesPath, blank);
+			const content = serializeSidecar({
+				source: sourceFile.path,
+				annotations: [],
+			});
+			await this.app.vault.create(notesPath, content);
 			notesFile =
 				this.app.vault.getAbstractFileByPath(notesPath);
 		}
 		if (!(notesFile instanceof TFile)) return;
 
-		// 5. Ensure notes file has at least as many lines as source
-		await this.ensureNoteFileLineCount(notesFile, sourceLineCount);
-
-		// 6. Open notes file in a split to the right
+		// Open in split
 		this.app.workspace.setActiveLeaf(sourceLeaf, { focus: true });
 		this.splitLeaf = this.app.workspace.createLeafBySplit(
 			sourceLeaf,
@@ -237,17 +200,9 @@ export default class MarginNotesPlugin extends Plugin {
 		this.splitSourceLeaf = sourceLeaf;
 		await this.splitLeaf.openFile(notesFile);
 
-		// 7. Cache source/notes lines for edit tracking
-		this.cachedSourceLines = sourceText.split("\n");
-		// Notes line count is set after ensureNoteFileLineCount ran
-		const notesText = await this.app.vault.cachedRead(notesFile);
-		this.cachedNotesLineCount = notesText.split("\n").length;
-
-		// 8. Add link toggle button
+		// Link toggle + spacers + sync
 		this.splitSyncEnabled = true;
 		this.addLinkToggle();
-
-		// 9. Line-height matching + scroll sync (after DOM settles)
 		setTimeout(() => {
 			this.recalculateSpacers();
 			setTimeout(() => this.attachSplitSync(), 100);
@@ -260,19 +215,15 @@ export default class MarginNotesPlugin extends Plugin {
 			this.splitLinkBtn = null;
 		}
 		if (this.splitLeaf) {
-			// Clear line heights
 			const cv = this.getCmView(this.splitLeaf);
-			if (cv) {
+			if (cv)
 				cv.dispatch({
 					effects: updateNoteSpacers.of([]),
 				});
-			}
 			this.splitLeaf.detach();
 			this.splitLeaf = null;
 		}
 		this.splitSourceLeaf = null;
-		this.cachedSourceLines = null;
-		this.cachedNotesLineCount = null;
 		this.scrollSync.detach();
 	}
 
@@ -283,68 +234,44 @@ export default class MarginNotesPlugin extends Plugin {
 			!this.splitSyncEnabled
 		)
 			return;
-		const srcEl = this.getLeafScrollContainer(this.splitSourceLeaf);
-		const scEl = this.getLeafScrollContainer(this.splitLeaf);
-		if (srcEl && scEl) {
-			this.scrollSync.attachToElements(srcEl, scEl);
-		}
+		const s = this.getLeafScrollContainer(this.splitSourceLeaf);
+		const n = this.getLeafScrollContainer(this.splitLeaf);
+		if (s && n) this.scrollSync.attachToElements(s, n);
 	}
 
-	/**
-	 * Find the source leaf — prioritize the pane's tracked file,
-	 * then the active markdown view, then any non-sidecar leaf.
-	 */
 	private findSourceLeaf(): {
 		leaf: WorkspaceLeaf | null;
 		file: TFile | null;
 	} {
 		const pane = this.getAnnotationPane();
-		const targetPath = pane?.getCurrentSourcePath();
+		const target = pane?.getCurrentSourcePath();
 
-		// 1. Pane's tracked file
-		if (targetPath) {
-			for (const leaf of this.app.workspace.getLeavesOfType(
+		if (target) {
+			for (const l of this.app.workspace.getLeavesOfType(
 				"markdown"
 			)) {
-				const v = leaf.view as MarkdownView;
-				if (v.file?.path === targetPath)
-					return { leaf, file: v.file };
+				const v = l.view as MarkdownView;
+				if (v.file?.path === target)
+					return { leaf: l, file: v.file };
 			}
 		}
 
-		// 2. Active markdown view
 		const active =
 			this.app.workspace.getActiveViewOfType(MarkdownView);
-		if (active?.file && !isSidecarFile(active.file.path)) {
+		if (active?.file && !isSidecarFile(active.file.path))
 			return { leaf: active.leaf, file: active.file };
-		}
 
-		// 3. Any non-sidecar markdown leaf
-		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
-			const v = leaf.view as MarkdownView;
+		for (const l of this.app.workspace.getLeavesOfType(
+			"markdown"
+		)) {
+			const v = l.view as MarkdownView;
 			if (v.file && !isSidecarFile(v.file.path))
-				return { leaf, file: v.file };
+				return { leaf: l, file: v.file };
 		}
-
 		return { leaf: null, file: null };
 	}
 
-	// ── Line count + height matching ───────────────────────────
-
-	private async ensureNoteFileLineCount(
-		notesFile: TFile,
-		sourceLineCount: number
-	): Promise<void> {
-		const content = await this.app.vault.read(notesFile);
-		const currentCount = content.split("\n").length;
-
-		if (currentCount < sourceLineCount) {
-			const padding = "\n".repeat(
-				sourceLineCount - currentCount
-			);
-			await this.app.vault.modify(notesFile, content + padding);
-		}
-	}
+	// ── Anchor-based spacer alignment ──────────────────────────
 
 	private scheduleSpacerRecalc(): void {
 		if (this.spacerTimer)
@@ -356,319 +283,70 @@ export default class MarginNotesPlugin extends Plugin {
 	}
 
 	/**
-	 * Insert block spacer widgets before each note group so its top
-	 * aligns with the corresponding source line. If a note overflows
-	 * past the next note's target position, the next spacer is 0 and
-	 * the note starts immediately after — alignment resumes downstream.
+	 * Match anchors by ID between source and notes editors, then
+	 * insert block spacer widgets so each note's top aligns with
+	 * its source anchor. Overflow is handled gracefully — the next
+	 * note starts right after with zero gap.
 	 */
 	private recalculateSpacers(): void {
 		if (!this.splitLeaf || !this.splitSourceLeaf) return;
 		if (!this.splitSyncEnabled) return;
 
-		const sourceCV = this.getCmView(this.splitSourceLeaf);
-		const notesCV = this.getCmView(this.splitLeaf);
-		if (!sourceCV || !notesCV) return;
+		const srcV = this.getCmView(this.splitSourceLeaf);
+		const notV = this.getCmView(this.splitLeaf);
+		if (!srcV || !notV) return;
 
-		// 1. Clear existing spacers so measurements are "natural"
-		notesCV.dispatch({ effects: updateNoteSpacers.of([]) });
-		notesCV.dom.getBoundingClientRect(); // force reflow
+		// Clear spacers so measurements are "natural"
+		notV.dispatch({ effects: updateNoteSpacers.of([]) });
+		notV.dom.getBoundingClientRect(); // force reflow
 
-		const notesDoc = notesCV.state.doc;
-		const sourceDoc = sourceCV.state.doc;
+		const srcAnchors = this.findAnchorsInDoc(srcV);
+		const notAnchors = this.findAnchorsInDoc(notV);
 
-		// 2. Find note groups (contiguous non-blank lines)
-		const groups: number[] = []; // start line numbers (1-based)
-		let inGroup = false;
-		for (let i = 1; i <= notesDoc.lines; i++) {
-			const text = notesDoc.line(i).text;
-			if (text.trim() !== "") {
-				if (!inGroup) {
-					groups.push(i);
-					inGroup = true;
-				}
-			} else {
-				inGroup = false;
-			}
-		}
-
-		if (groups.length === 0) return;
-
-		// 3. Calculate spacer heights iteratively
 		const entries: SpacerEntry[] = [];
 		let accumulated = 0;
 
-		for (const startLine of groups) {
-			// Source line this note is tied to
-			const srcLine = Math.min(startLine, sourceDoc.lines);
-			const targetY = sourceCV.lineBlockAt(
-				sourceDoc.line(srcLine).from
-			).top;
+		for (const na of notAnchors) {
+			const sa = srcAnchors.find((a) => a.id === na.id);
+			if (!sa) continue;
 
-			// Note's natural position (without spacers)
-			const naturalY = notesCV.lineBlockAt(
-				notesDoc.line(startLine).from
-			).top;
-
-			// Where it would be with all previous spacers
-			const currentY = naturalY + accumulated;
-
-			// Push down to align, or 0 if previous note overflowed
+			const targetY = sa.top;
+			const currentY = na.top + accumulated;
 			const spacer = Math.max(0, targetY - currentY);
 
 			if (spacer > 0) {
-				entries.push({
-					pos: notesDoc.line(startLine).from,
-					height: spacer,
-				});
+				entries.push({ pos: na.pos, height: spacer });
 				accumulated += spacer;
 			}
 		}
 
-		// 4. Apply
-		notesCV.dispatch({ effects: updateNoteSpacers.of(entries) });
+		notV.dispatch({ effects: updateNoteSpacers.of(entries) });
 	}
 
-	// ── Edit tracking (line sync) ──────────────────────────────
+	/** Find all <!-- ann:ID --> anchors in a CM6 editor and return their positions. */
+	private findAnchorsInDoc(
+		view: EditorView
+	): { id: string; top: number; pos: number }[] {
+		const re = /<!-- ann:(\w+) -->/;
+		const doc = view.state.doc;
+		const result: { id: string; top: number; pos: number }[] =
+			[];
 
-	/** Dispatch editor-change events to the right handler. */
-	private onEditorChange(editor: any, info: any): void {
-		if (!this.splitLeaf || !this.splitSourceLeaf) return;
-		if (this.applyingLineDiff) return;
-
-		const changedPath = info?.file?.path;
-		const sourceFile = (this.splitSourceLeaf.view as MarkdownView)
-			.file;
-		const notesFile = (this.splitLeaf.view as MarkdownView).file;
-
-		if (changedPath === sourceFile?.path) {
-			this.onSourceEditorChange(editor);
-		} else if (changedPath === notesFile?.path) {
-			this.onNotesEditorChange(editor);
-		}
-	}
-
-	/** Source file changed — mirror line insertions/deletions to notes. */
-	private onSourceEditorChange(editor: any): void {
-		if (!this.cachedSourceLines) return;
-
-		const newLineCount = editor.lineCount();
-		if (newLineCount === this.cachedSourceLines.length) return;
-
-		const newLines = (editor.getValue() as string).split("\n");
-		this.applyLineDiff(this.cachedSourceLines, newLines);
-		this.cachedSourceLines = newLines;
-
-		// Keep notes cache in sync after we modified the notes file
-		if (this.splitLeaf) {
-			const nv = this.splitLeaf.view as MarkdownView;
-			this.cachedNotesLineCount = nv.editor.lineCount();
-		}
-
-		this.scheduleSpacerRecalc();
-	}
-
-	/**
-	 * Notes file changed by user — absorb extra lines by removing
-	 * nearby blank lines, or pad if lines were deleted, so that
-	 * notes below the edit stay aligned with their source lines.
-	 */
-	private onNotesEditorChange(editor: any): void {
-		if (this.cachedNotesLineCount == null) return;
-
-		const newCount = editor.lineCount();
-		const delta = newCount - this.cachedNotesLineCount;
-		if (delta === 0) return;
-
-		this.cachedNotesLineCount = newCount;
-
-		if (delta > 0) {
-			this.absorbExtraNotesLines(editor, delta);
-		} else {
-			this.padRemovedNotesLines(editor, -delta);
-		}
-
-		this.scheduleSpacerRecalc();
-	}
-
-	/**
-	 * User added lines in the notes file (e.g. pressed Enter to
-	 * continue a note). Find and remove the nearest blank lines
-	 * below the edit point to keep everything else aligned.
-	 */
-	private absorbExtraNotesLines(editor: any, count: number): void {
-		const cursor = editor.getCursor();
-		const searchStart = cursor.line + 1;
-
-		this.applyingLineDiff = true;
-		try {
-			let removed = 0;
-			let i = searchStart;
-			while (i < editor.lineCount() && removed < count) {
-				const text = editor.getLine(i);
-				if (text.trim() === "") {
-					if (i < editor.lineCount() - 1) {
-						editor.replaceRange(
-							"",
-							{ line: i, ch: 0 },
-							{ line: i + 1, ch: 0 }
-						);
-					} else if (i > 0) {
-						const prev = editor.getLine(i - 1);
-						editor.replaceRange(
-							"",
-							{ line: i - 1, ch: prev.length },
-							{ line: i, ch: text.length }
-						);
-					}
-					removed++;
-					// Don't increment — next line slid into position i
-				} else {
-					i++;
-				}
+		for (let i = 1; i <= doc.lines; i++) {
+			const line = doc.line(i);
+			const m = re.exec(line.text);
+			if (m) {
+				result.push({
+					id: m[1],
+					top: view.lineBlockAt(line.from).top,
+					pos: line.from,
+				});
 			}
-			this.cachedNotesLineCount = editor.lineCount();
-		} finally {
-			this.applyingLineDiff = false;
 		}
+		return result;
 	}
 
-	/**
-	 * User removed lines in the notes file. Pad at the end so the
-	 * total line count stays >= source line count.
-	 */
-	private padRemovedNotesLines(editor: any, count: number): void {
-		if (!this.cachedSourceLines) return;
-
-		const notesCount = editor.lineCount();
-		const needed = this.cachedSourceLines.length - notesCount;
-		if (needed <= 0) return;
-
-		const pad = Math.min(count, needed);
-		this.applyingLineDiff = true;
-		try {
-			const lastLine = editor.lineCount() - 1;
-			const lastText = editor.getLine(lastLine);
-			editor.replaceRange(
-				"\n".repeat(pad),
-				{ line: lastLine, ch: lastText.length }
-			);
-			this.cachedNotesLineCount = editor.lineCount();
-		} finally {
-			this.applyingLineDiff = false;
-		}
-	}
-
-	/**
-	 * Diff old vs new source lines and apply matching changes
-	 * to the notes editor. Insertions add blank lines; deletions
-	 * remove only blank lines (content is never lost).
-	 */
-	private applyLineDiff(
-		oldLines: string[],
-		newLines: string[]
-	): void {
-		if (!this.splitLeaf) return;
-		const notesView = this.splitLeaf.view;
-		if (!(notesView instanceof MarkdownView)) return;
-		const notesEditor = notesView.editor;
-
-		const change = this.diffLines(oldLines, newLines);
-		if (!change) return;
-
-		const { position, removed, added } = change;
-		this.applyingLineDiff = true;
-
-		try {
-			if (added > removed) {
-				// Lines inserted in source → insert blank lines in notes
-				const count = added - removed;
-				const insertAt = Math.min(
-					position + removed,
-					notesEditor.lineCount()
-				);
-				notesEditor.replaceRange(
-					"\n".repeat(count),
-					{ line: insertAt, ch: 0 }
-				);
-			} else if (removed > added) {
-				// Lines deleted from source → remove blank notes lines
-				const count = removed - added;
-				const deleteAt = position + added;
-
-				// Delete from bottom up so indices stay valid
-				for (let i = count - 1; i >= 0; i--) {
-					const idx = deleteAt + i;
-					if (idx >= notesEditor.lineCount()) continue;
-
-					const text = notesEditor.getLine(idx);
-					if (text.trim() !== "") continue; // never delete content
-
-					if (idx < notesEditor.lineCount() - 1) {
-						// Delete this line (including its newline)
-						notesEditor.replaceRange(
-							"",
-							{ line: idx, ch: 0 },
-							{ line: idx + 1, ch: 0 }
-						);
-					} else if (idx > 0) {
-						// Last line — remove the newline before it
-						const prev = notesEditor.getLine(idx - 1);
-						notesEditor.replaceRange(
-							"",
-							{ line: idx - 1, ch: prev.length },
-							{ line: idx, ch: text.length }
-						);
-					}
-				}
-			}
-		} finally {
-			this.applyingLineDiff = false;
-		}
-	}
-
-	/**
-	 * Find the single contiguous change between two line arrays.
-	 * Returns the position and size of the changed region, or null
-	 * if no structural change (only content edits within lines).
-	 */
-	private diffLines(
-		oldLines: string[],
-		newLines: string[]
-	): { position: number; removed: number; added: number } | null {
-		// Common prefix
-		let top = 0;
-		const minLen = Math.min(oldLines.length, newLines.length);
-		while (
-			top < minLen &&
-			oldLines[top] === newLines[top]
-		) {
-			top++;
-		}
-
-		// Common suffix
-		let oldBot = oldLines.length - 1;
-		let newBot = newLines.length - 1;
-		while (
-			oldBot > top &&
-			newBot > top &&
-			oldLines[oldBot] === newLines[newBot]
-		) {
-			oldBot--;
-			newBot--;
-		}
-
-		// Clamp
-		if (oldBot < top) oldBot = top - 1;
-		if (newBot < top) newBot = top - 1;
-
-		const removed = oldBot - top + 1;
-		const added = newBot - top + 1;
-		if (removed === 0 && added === 0) return null;
-
-		return { position: top, removed, added };
-	}
-
-	// ── Link toggle button ─────────────────────────────────────
+	// ── Link toggle ────────────────────────────────────────────
 
 	private addLinkToggle(): void {
 		if (!this.splitLeaf) return;
@@ -710,18 +388,17 @@ export default class MarginNotesPlugin extends Plugin {
 				const cv = this.splitLeaf
 					? this.getCmView(this.splitLeaf)
 					: null;
-				if (cv) {
+				if (cv)
 					cv.dispatch({
 						effects: updateNoteSpacers.of([]),
 					});
-				}
 			}
 		});
 	}
 
-	// ── Annotation creation (anchor-based, for comments pane) ──
+	// ── Annotation creation ────────────────────────────────────
 
-	private async addAnnotationFromEditor(
+	private async addAnnotation(
 		view: MarkdownView
 	): Promise<void> {
 		const file = view.file;
@@ -746,15 +423,24 @@ export default class MarginNotesPlugin extends Plugin {
 		});
 
 		await this.ensureAnnotationInSidecar(file.path, id);
-		await this.ensureCommentsPaneOpen();
 
-		const pane = this.getAnnotationPane();
-		if (pane) {
-			await pane.loadForFile(file.path);
-			pane.focusAnnotation(id);
+		if (this.splitLeaf) {
+			// Split view: jump cursor to the new note
+			setTimeout(() => this.focusNoteInSplit(id), 400);
+		} else {
+			// No split: open comments pane
+			if (Platform.isMobile) {
+				await this.ensureCommentsPaneOpen();
+			}
+			const pane = this.getAnnotationPane();
+			if (pane) {
+				await pane.loadForFile(file.path);
+				pane.focusAnnotation(id);
+			}
 		}
 	}
 
+	/** Called from the comments pane "+" button. */
 	async addAnnotationAtCursor(): Promise<void> {
 		let view =
 			this.app.workspace.getActiveViewOfType(MarkdownView);
@@ -765,14 +451,13 @@ export default class MarginNotesPlugin extends Plugin {
 			isSidecarFile(view.file.path)
 		) {
 			const pane = this.getAnnotationPane();
-			const targetPath = pane?.getCurrentSourcePath();
-
-			for (const leaf of this.app.workspace.getLeavesOfType(
+			const target = pane?.getCurrentSourcePath();
+			for (const l of this.app.workspace.getLeavesOfType(
 				"markdown"
 			)) {
-				const v = leaf.view as MarkdownView;
+				const v = l.view as MarkdownView;
 				if (!v.file || isSidecarFile(v.file.path)) continue;
-				if (targetPath && v.file.path === targetPath) {
+				if (target && v.file.path === target) {
 					view = v;
 					break;
 				}
@@ -785,28 +470,7 @@ export default class MarginNotesPlugin extends Plugin {
 			return;
 		}
 
-		const editor = view.editor;
-		const cursor = editor.getCursor();
-		const line = editor.getLine(cursor.line);
-
-		if (ANCHOR_RE.test(line)) {
-			new Notice("This line already has an annotation");
-			return;
-		}
-
-		const id = generateId();
-		editor.replaceRange(` <!-- ann:${id} -->`, {
-			line: cursor.line,
-			ch: line.length,
-		});
-
-		await this.ensureAnnotationInSidecar(view.file.path, id);
-
-		const pane = this.getAnnotationPane();
-		if (pane) {
-			await pane.loadForFile(view.file.path);
-			pane.focusAnnotation(id);
-		}
+		await this.addAnnotation(view);
 	}
 
 	private async ensureAnnotationInSidecar(
@@ -814,51 +478,86 @@ export default class MarginNotesPlugin extends Plugin {
 		anchorId: string
 	): Promise<void> {
 		const sidecarPath = getSidecarPath(sourcePath);
-		const sidecar = await this.loadSidecar(sidecarPath, sourcePath);
+		const sidecar = await this.loadSidecar(
+			sidecarPath,
+			sourcePath
+		);
 		sidecar.annotations.push({ anchorId, content: "" });
 
-		const sourceFile =
+		const sf =
 			this.app.vault.getAbstractFileByPath(sourcePath);
-		if (sourceFile instanceof TFile) {
-			const sourceText =
-				await this.app.vault.cachedRead(sourceFile);
-			sortAnnotationsBySource(sidecar, sourceText);
+		if (sf instanceof TFile) {
+			sortAnnotationsBySource(
+				sidecar,
+				await this.app.vault.cachedRead(sf)
+			);
 		}
 
 		await this.saveSidecar(sidecarPath, sidecar);
 	}
 
+	/**
+	 * After creating a note in the sidecar, jump the cursor to it
+	 * in the split view so the user can start typing immediately.
+	 */
+	private focusNoteInSplit(anchorId: string): void {
+		if (!this.splitLeaf) return;
+		const nv = this.splitLeaf.view;
+		if (!(nv instanceof MarkdownView)) return;
+
+		const text = nv.editor.getValue();
+		const lines = text.split("\n");
+		for (let i = 0; i < lines.length; i++) {
+			if (lines[i].includes(`<!-- ann:${anchorId} -->`)) {
+				// Cursor goes 2 lines below the marker
+				// (marker line, blank line, then content line)
+				const target = Math.min(
+					i + 2,
+					lines.length - 1
+				);
+				this.app.workspace.setActiveLeaf(
+					this.splitLeaf!,
+					{ focus: true }
+				);
+				nv.editor.setCursor({
+					line: target,
+					ch: 0,
+				});
+				break;
+			}
+		}
+
+		this.recalculateSpacers();
+	}
+
 	// ── Sidecar I/O ────────────────────────────────────────────
 
 	private async loadSidecar(
-		sidecarPath: string,
+		path: string,
 		sourcePath: string
 	): Promise<SidecarData> {
-		const file =
-			this.app.vault.getAbstractFileByPath(sidecarPath);
-		if (file instanceof TFile) {
+		const f = this.app.vault.getAbstractFileByPath(path);
+		if (f instanceof TFile)
 			return parseSidecar(
-				await this.app.vault.cachedRead(file)
+				await this.app.vault.cachedRead(f)
 			);
-		}
 		return { source: sourcePath, annotations: [] };
 	}
 
 	private async saveSidecar(
-		sidecarPath: string,
+		path: string,
 		data: SidecarData
 	): Promise<void> {
 		const content = serializeSidecar(data);
-		const existing =
-			this.app.vault.getAbstractFileByPath(sidecarPath);
-		if (existing instanceof TFile) {
-			await this.app.vault.modify(existing, content);
+		const f = this.app.vault.getAbstractFileByPath(path);
+		if (f instanceof TFile) {
+			await this.app.vault.modify(f, content);
 		} else {
-			await this.app.vault.create(sidecarPath, content);
+			await this.app.vault.create(path, content);
 		}
 	}
 
-	// ── Comments pane (secondary) ──────────────────────────────
+	// ── Comments pane (mobile / secondary) ─────────────────────
 
 	async toggleCommentsPane(): Promise<void> {
 		const existing =
@@ -878,11 +577,8 @@ export default class MarginNotesPlugin extends Plugin {
 			this.app.workspace.revealLeaf(existing[0]);
 			return;
 		}
-
 		let leaf = this.app.workspace.getRightLeaf(false);
-		if (!leaf) {
-			leaf = this.app.workspace.getLeaf("split");
-		}
+		if (!leaf) leaf = this.app.workspace.getLeaf("split");
 		await leaf.setViewState({
 			type: VIEW_TYPE_ANNOTATIONS,
 			active: true,
@@ -913,7 +609,10 @@ export default class MarginNotesPlugin extends Plugin {
 	scrollSourceToAnchor(anchorId: string): void {
 		const el = this.findSourceElement(anchorId);
 		if (el) {
-			el.scrollIntoView({ behavior: "smooth", block: "center" });
+			el.scrollIntoView({
+				behavior: "smooth",
+				block: "center",
+			});
 			this.flashElement(el);
 			return;
 		}
@@ -925,40 +624,32 @@ export default class MarginNotesPlugin extends Plugin {
 		const lines = text.split("\n");
 		let anchorLine = -1;
 		for (let i = 0; i < lines.length; i++) {
-			if (
-				lines[i].includes(`<!-- ann:${anchorId} -->`)
-			) {
+			if (lines[i].includes(`<!-- ann:${anchorId} -->`)) {
 				anchorLine = i;
 				break;
 			}
 		}
 		if (anchorLine < 0) return;
 
-		const mode = mdView.getMode();
-		if (mode === "source") {
-			const cmView = this.getCmView(mdView.leaf);
-			if (cmView) {
-				const pos = cmView.state.doc.line(
-					anchorLine + 1
-				).from;
-				cmView.dispatch({
-					effects: EditorView.scrollIntoView(pos, {
-						y: "center",
-					}),
+		if (mdView.getMode() === "source") {
+			const cv = this.getCmView(mdView.leaf);
+			if (cv) {
+				cv.dispatch({
+					effects: EditorView.scrollIntoView(
+						cv.state.doc.line(anchorLine + 1).from,
+						{ y: "center" }
+					),
 				});
 			}
 		} else {
-			const scrollEl =
-				mdView.containerEl.querySelector(
-					".markdown-preview-view"
-				) as HTMLElement | null;
-			if (scrollEl) {
+			const sc = mdView.containerEl.querySelector(
+				".markdown-preview-view"
+			) as HTMLElement | null;
+			if (sc) {
 				const frac =
 					anchorLine / Math.max(lines.length, 1);
-				scrollEl.scrollTop =
-					frac *
-					(scrollEl.scrollHeight -
-						scrollEl.clientHeight);
+				sc.scrollTop =
+					frac * (sc.scrollHeight - sc.clientHeight);
 			}
 		}
 
@@ -980,20 +671,16 @@ export default class MarginNotesPlugin extends Plugin {
 		const card = pane.getCardElement(anchorId);
 		if (!card) return;
 		card.scrollIntoView({ behavior: "smooth", block: "center" });
-		card.classList.add("margin-notes-flash");
-		setTimeout(
-			() => card.classList.remove("margin-notes-flash"),
-			1500
-		);
+		this.flashElement(card);
 	}
 
 	private findSourceElement(
 		anchorId: string
 	): HTMLElement | null {
-		for (const leaf of this.app.workspace.getLeavesOfType(
+		for (const l of this.app.workspace.getLeavesOfType(
 			"markdown"
 		)) {
-			const el = leaf.view.containerEl.querySelector(
+			const el = l.view.containerEl.querySelector(
 				`[data-ann-id="${anchorId}"]`
 			) as HTMLElement | null;
 			if (el) return el;
@@ -1011,21 +698,19 @@ export default class MarginNotesPlugin extends Plugin {
 
 	private getSourceMarkdownView(): MarkdownView | null {
 		const pane = this.getAnnotationPane();
-		const targetPath = pane?.getCurrentSourcePath();
-
-		if (targetPath) {
-			for (const leaf of this.app.workspace.getLeavesOfType(
+		const target = pane?.getCurrentSourcePath();
+		if (target) {
+			for (const l of this.app.workspace.getLeavesOfType(
 				"markdown"
 			)) {
-				const v = leaf.view as MarkdownView;
-				if (v.file?.path === targetPath) return v;
+				const v = l.view as MarkdownView;
+				if (v.file?.path === target) return v;
 			}
 		}
-
-		for (const leaf of this.app.workspace.getLeavesOfType(
+		for (const l of this.app.workspace.getLeavesOfType(
 			"markdown"
 		)) {
-			const v = leaf.view as MarkdownView;
+			const v = l.view as MarkdownView;
 			if (v.file && !isSidecarFile(v.file.path)) return v;
 		}
 		return null;
@@ -1033,7 +718,9 @@ export default class MarginNotesPlugin extends Plugin {
 
 	// ── Helpers ────────────────────────────────────────────────
 
-	private getCmView(leaf: WorkspaceLeaf): EditorView | null {
+	private getCmView(
+		leaf: WorkspaceLeaf
+	): EditorView | null {
 		if (!(leaf.view instanceof MarkdownView)) return null;
 		// @ts-ignore — accessing internal CM6 editor view
 		return (leaf.view.editor as any).cm ?? null;
@@ -1044,11 +731,10 @@ export default class MarginNotesPlugin extends Plugin {
 	): HTMLElement | null {
 		if (!(leaf.view instanceof MarkdownView)) return null;
 		const mode = (leaf.view as MarkdownView).getMode();
-		if (mode === "preview") {
+		if (mode === "preview")
 			return leaf.view.containerEl.querySelector(
 				".markdown-preview-view"
 			) as HTMLElement | null;
-		}
 		return leaf.view.containerEl.querySelector(
 			".cm-scroller"
 		) as HTMLElement | null;
@@ -1059,7 +745,6 @@ export default class MarginNotesPlugin extends Plugin {
 	private onActiveLeafChange(): void {
 		const pane = this.getAnnotationPane();
 		if (!pane) return;
-
 		const file = this.app.workspace.getActiveFile();
 		if (
 			file &&
@@ -1078,23 +763,21 @@ export default class MarginNotesPlugin extends Plugin {
 		if (!(file instanceof TFile)) return;
 		if (isSidecarFile(file.path) || isSidecarFile(oldPath))
 			return;
-
-		const oldSidecarPath = getSidecarPath(oldPath);
-		const sidecar =
-			this.app.vault.getAbstractFileByPath(oldSidecarPath);
-		if (!(sidecar instanceof TFile)) return;
-
-		const newSidecarPath = getSidecarPath(file.path);
-		await this.app.vault.rename(sidecar, newSidecarPath);
-
-		const renamedFile =
-			this.app.vault.getAbstractFileByPath(newSidecarPath);
-		if (renamedFile instanceof TFile) {
-			const raw = await this.app.vault.read(renamedFile);
-			const data = parseSidecar(raw);
+		const oldSc = getSidecarPath(oldPath);
+		const sc =
+			this.app.vault.getAbstractFileByPath(oldSc);
+		if (!(sc instanceof TFile)) return;
+		const newSc = getSidecarPath(file.path);
+		await this.app.vault.rename(sc, newSc);
+		const rf =
+			this.app.vault.getAbstractFileByPath(newSc);
+		if (rf instanceof TFile) {
+			const data = parseSidecar(
+				await this.app.vault.read(rf)
+			);
 			data.source = file.path;
 			await this.app.vault.modify(
-				renamedFile,
+				rf,
 				serializeSidecar(data)
 			);
 		}
@@ -1103,26 +786,21 @@ export default class MarginNotesPlugin extends Plugin {
 	private onFileModified(file: TAbstractFile): void {
 		if (!(file instanceof TFile)) return;
 
-		// Comments pane: reload if sidecar changed externally
+		// Comments pane
 		const pane = this.getAnnotationPane();
 		if (
 			pane &&
 			isSidecarFile(file.path) &&
 			!pane.getSuppressReload()
 		) {
-			const sourcePath = file.path.replace(
-				/\.ann\.md$/,
-				".md"
-			);
-			if (pane.getCurrentSourcePath() === sourcePath) {
-				pane.loadForFile(sourcePath);
-			}
+			const src = file.path.replace(/\.ann\.md$/, ".md");
+			if (pane.getCurrentSourcePath() === src)
+				pane.loadForFile(src);
 		}
 
-		// Split view: recalculate line heights when source changes
-		if (this.splitLeaf && this.splitSyncEnabled) {
+		// Split view: recalculate spacers when either file changes
+		if (this.splitLeaf && this.splitSyncEnabled)
 			this.scheduleSpacerRecalc();
-		}
 	}
 
 	// ── Export ──────────────────────────────────────────────────
@@ -1133,28 +811,25 @@ export default class MarginNotesPlugin extends Plugin {
 			new Notice("No active file");
 			return;
 		}
-
 		const sourcePath = isSidecarFile(active.path)
 			? active.path.replace(/\.ann\.md$/, ".md")
 			: active.path;
-
 		try {
-			const html = await exportToHtml(this.app, sourcePath);
-			const exportPath = sourcePath.replace(/\.md$/, ".html");
-
-			const existing =
-				this.app.vault.getAbstractFileByPath(exportPath);
-			if (existing instanceof TFile) {
-				await this.app.vault.modify(existing, html);
-			} else {
-				await this.app.vault.create(exportPath, html);
-			}
-
-			new Notice(`Exported to ${exportPath}`);
+			const html = await exportToHtml(
+				this.app,
+				sourcePath
+			);
+			const ep = sourcePath.replace(/\.md$/, ".html");
+			const ef =
+				this.app.vault.getAbstractFileByPath(ep);
+			if (ef instanceof TFile)
+				await this.app.vault.modify(ef, html);
+			else await this.app.vault.create(ep, html);
+			new Notice(`Exported to ${ep}`);
 		} catch (e: unknown) {
-			const msg =
-				e instanceof Error ? e.message : String(e);
-			new Notice(`Export failed: ${msg}`);
+			new Notice(
+				`Export failed: ${e instanceof Error ? e.message : String(e)}`
+			);
 		}
 	}
 }
