@@ -32,6 +32,12 @@ export default class MarginNotesPlugin extends Plugin {
 	private splitSyncEnabled = true;
 	private splitLinkBtn: HTMLElement | null = null;
 	private spacerTimer: number | null = null;
+	/** Cached source lines for detecting line insertions/deletions. */
+	private cachedSourceLines: string[] | null = null;
+	/** Cached notes line count for detecting Enter presses. */
+	private cachedNotesLineCount: number | null = null;
+	/** Guard against recursive edits. */
+	private applyingDiff = false;
 
 	async onload(): Promise<void> {
 		this.scrollSync = new ScrollSync(this);
@@ -116,6 +122,15 @@ export default class MarginNotesPlugin extends Plugin {
 				this.onFileModified(f)
 			)
 		);
+		// Track edits in both panes for auto-anchor + line sync
+		this.registerEvent(
+			// @ts-ignore — editor-change event typing
+			this.app.workspace.on(
+				"editor-change",
+				(editor: any, info: any) =>
+					this.onEditorChange(editor, info)
+			)
+		);
 		this.registerEvent(
 			this.app.workspace.on("layout-change", () => {
 				if (this.getAnnotationPane())
@@ -176,20 +191,29 @@ export default class MarginNotesPlugin extends Plugin {
 		const rs = this.app.workspace.rightSplit;
 		if (rs && !rs.collapsed) rs.collapse();
 
-		// Get or create the .ann.md notes file (anchor format)
+		// Get or create the .ann.md notes file
 		const notesPath = getSidecarPath(sourceFile.path);
 		let notesFile =
 			this.app.vault.getAbstractFileByPath(notesPath);
+
+		const sourceText =
+			await this.app.vault.cachedRead(sourceFile);
+		const sourceLines = sourceText.split("\n");
+
 		if (!(notesFile instanceof TFile)) {
-			const content = serializeSidecar({
-				source: sourceFile.path,
-				annotations: [],
-			});
-			await this.app.vault.create(notesPath, content);
+			// Create padded file: N blank lines matching source
+			const blank =
+				sourceLines.length > 1
+					? "\n".repeat(sourceLines.length - 1)
+					: "";
+			await this.app.vault.create(notesPath, blank);
 			notesFile =
 				this.app.vault.getAbstractFileByPath(notesPath);
 		}
 		if (!(notesFile instanceof TFile)) return;
+
+		// Cache source lines for edit tracking
+		this.cachedSourceLines = sourceLines;
 
 		// Open in split
 		this.app.workspace.setActiveLeaf(sourceLeaf, { focus: true });
@@ -199,6 +223,10 @@ export default class MarginNotesPlugin extends Plugin {
 		);
 		this.splitSourceLeaf = sourceLeaf;
 		await this.splitLeaf.openFile(notesFile);
+
+		// Cache notes line count
+		const nv = this.splitLeaf.view as MarkdownView;
+		this.cachedNotesLineCount = nv.editor.lineCount();
 
 		// Link toggle + spacers + sync
 		this.splitSyncEnabled = true;
@@ -224,6 +252,8 @@ export default class MarginNotesPlugin extends Plugin {
 			this.splitLeaf = null;
 		}
 		this.splitSourceLeaf = null;
+		this.cachedSourceLines = null;
+		this.cachedNotesLineCount = null;
 		this.scrollSync.detach();
 	}
 
@@ -344,6 +374,267 @@ export default class MarginNotesPlugin extends Plugin {
 			}
 		}
 		return result;
+	}
+
+	// ── Edit tracking (auto-anchor + line sync) ───────────────
+
+	private onEditorChange(editor: any, info: any): void {
+		if (!this.splitLeaf || !this.splitSourceLeaf) return;
+		if (this.applyingDiff) return;
+
+		const changed = info?.file?.path;
+		const srcFile = (this.splitSourceLeaf.view as MarkdownView)
+			.file;
+		const notFile = (this.splitLeaf.view as MarkdownView).file;
+
+		if (changed === srcFile?.path) {
+			this.onSourceEdit(editor);
+		} else if (changed === notFile?.path) {
+			this.onNotesEdit(editor);
+		}
+	}
+
+	/** Source file edited — mirror line insertions/deletions to notes. */
+	private onSourceEdit(editor: any): void {
+		if (!this.cachedSourceLines) return;
+		const newCount = editor.lineCount();
+		if (newCount === this.cachedSourceLines.length) return;
+
+		const newLines = (editor.getValue() as string).split("\n");
+		const change = this.diffLines(
+			this.cachedSourceLines,
+			newLines
+		);
+		this.cachedSourceLines = newLines;
+		if (!change) return;
+
+		const nv = this.splitLeaf?.view;
+		if (!(nv instanceof MarkdownView)) return;
+		const ne = nv.editor;
+
+		this.applyingDiff = true;
+		try {
+			const { position, removed, added } = change;
+			if (added > removed) {
+				const count = added - removed;
+				const at = Math.min(
+					position + removed,
+					ne.lineCount()
+				);
+				ne.replaceRange("\n".repeat(count), {
+					line: at,
+					ch: 0,
+				});
+			} else if (removed > added) {
+				const count = removed - added;
+				const at = position + added;
+				for (let i = count - 1; i >= 0; i--) {
+					const idx = at + i;
+					if (idx >= ne.lineCount()) continue;
+					if (ne.getLine(idx).trim() !== "") continue;
+					if (idx < ne.lineCount() - 1) {
+						ne.replaceRange(
+							"",
+							{ line: idx, ch: 0 },
+							{ line: idx + 1, ch: 0 }
+						);
+					} else if (idx > 0) {
+						const prev = ne.getLine(idx - 1);
+						ne.replaceRange(
+							"",
+							{ line: idx - 1, ch: prev.length },
+							{ line: idx, ch: 0 }
+						);
+					}
+				}
+			}
+			this.cachedNotesLineCount = ne.lineCount();
+		} finally {
+			this.applyingDiff = false;
+		}
+		this.scheduleSpacerRecalc();
+	}
+
+	/**
+	 * Notes file edited — auto-create anchors when the user types
+	 * on a blank line, and absorb extra lines on Enter.
+	 */
+	private onNotesEdit(editor: any): void {
+		if (this.cachedNotesLineCount == null) return;
+
+		const cursor = editor.getCursor();
+		const lineText: string = editor.getLine(cursor.line);
+		const newCount: number = editor.lineCount();
+
+		// ── Auto-anchor: user typed on a blank line ────────────
+		if (
+			lineText.trim() !== "" &&
+			!ANCHOR_RE.test(lineText) &&
+			this.isNoteGroupStart(editor, cursor.line)
+		) {
+			this.autoCreateAnchor(editor, cursor.line);
+		}
+
+		// ── Absorption: line count changed (Enter / delete) ───
+		const delta = newCount - this.cachedNotesLineCount;
+		this.cachedNotesLineCount = newCount;
+
+		if (delta > 0) {
+			// Lines added — absorb blank lines below
+			this.applyingDiff = true;
+			try {
+				let removed = 0;
+				let i = cursor.line + 1;
+				while (
+					i < editor.lineCount() &&
+					removed < delta
+				) {
+					if (editor.getLine(i).trim() === "") {
+						if (i < editor.lineCount() - 1) {
+							editor.replaceRange(
+								"",
+								{ line: i, ch: 0 },
+								{ line: i + 1, ch: 0 }
+							);
+						} else if (i > 0) {
+							const p = editor.getLine(i - 1);
+							editor.replaceRange(
+								"",
+								{
+									line: i - 1,
+									ch: p.length,
+								},
+								{ line: i, ch: 0 }
+							);
+						}
+						removed++;
+					} else {
+						i++;
+					}
+				}
+				this.cachedNotesLineCount =
+					editor.lineCount();
+			} finally {
+				this.applyingDiff = false;
+			}
+		} else if (delta < 0 && this.cachedSourceLines) {
+			// Lines deleted — pad at end if below source count
+			const needed =
+				this.cachedSourceLines.length -
+				editor.lineCount();
+			if (needed > 0) {
+				this.applyingDiff = true;
+				try {
+					const last = editor.lineCount() - 1;
+					editor.replaceRange(
+						"\n".repeat(needed),
+						{
+							line: last,
+							ch: editor.getLine(last).length,
+						}
+					);
+					this.cachedNotesLineCount =
+						editor.lineCount();
+				} finally {
+					this.applyingDiff = false;
+				}
+			}
+		}
+
+		this.scheduleSpacerRecalc();
+	}
+
+	/** Check if lineNum is the first non-blank line in its group (needs a new anchor). */
+	private isNoteGroupStart(
+		editor: any,
+		lineNum: number
+	): boolean {
+		for (let i = lineNum - 1; i >= 0; i--) {
+			const t: string = editor.getLine(i);
+			if (t.trim() === "") return true; // blank above = new group
+			if (ANCHOR_RE.test(t)) return false; // anchor above = continuation
+		}
+		return true; // top of file
+	}
+
+	/** Create matching anchors in both source and notes files. */
+	private autoCreateAnchor(
+		editor: any,
+		notesLineNum: number
+	): void {
+		if (!this.splitSourceLeaf) return;
+		const sv = this.splitSourceLeaf.view;
+		if (!(sv instanceof MarkdownView)) return;
+
+		const id = generateId();
+
+		// Determine which source line this corresponds to.
+		// With padding, notes line N ≈ source line N (adjusted for
+		// anchor marker lines that exist above the cursor).
+		let anchorLinesAbove = 0;
+		for (let i = 0; i < notesLineNum; i++) {
+			if (ANCHOR_RE.test(editor.getLine(i)))
+				anchorLinesAbove++;
+		}
+		const srcLineNum = Math.min(
+			notesLineNum - anchorLinesAbove,
+			sv.editor.lineCount() - 1
+		);
+
+		// Insert anchor in source file
+		const srcLine = sv.editor.getLine(srcLineNum);
+		if (!ANCHOR_RE.test(srcLine)) {
+			this.applyingDiff = true;
+			sv.editor.replaceRange(` <!-- ann:${id} -->`, {
+				line: srcLineNum,
+				ch: srcLine.length,
+			});
+			// Update cached source
+			this.cachedSourceLines = (
+				sv.editor.getValue() as string
+			).split("\n");
+			this.applyingDiff = false;
+		}
+
+		// Prepend anchor to the notes line (invisible in Live Preview)
+		this.applyingDiff = true;
+		editor.replaceRange(`<!-- ann:${id} -->`, {
+			line: notesLineNum,
+			ch: 0,
+		});
+		this.cachedNotesLineCount = editor.lineCount();
+		this.applyingDiff = false;
+	}
+
+	private diffLines(
+		oldL: string[],
+		newL: string[]
+	): {
+		position: number;
+		removed: number;
+		added: number;
+	} | null {
+		let top = 0;
+		const min = Math.min(oldL.length, newL.length);
+		while (top < min && oldL[top] === newL[top]) top++;
+
+		let ob = oldL.length - 1;
+		let nb = newL.length - 1;
+		while (
+			ob > top &&
+			nb > top &&
+			oldL[ob] === newL[nb]
+		) {
+			ob--;
+			nb--;
+		}
+		if (ob < top) ob = top - 1;
+		if (nb < top) nb = top - 1;
+
+		const removed = ob - top + 1;
+		const added = nb - top + 1;
+		if (removed === 0 && added === 0) return null;
+		return { position: top, removed, added };
 	}
 
 	// ── Link toggle ────────────────────────────────────────────
