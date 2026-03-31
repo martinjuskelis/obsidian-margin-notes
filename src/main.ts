@@ -195,18 +195,22 @@ export default class MarginNotesPlugin extends Plugin {
 	async addAnnotationAtCursor(): Promise<void> {
 		let view = this.app.workspace.getActiveViewOfType(MarkdownView);
 
-		// If the active view isn't a markdown editor (e.g. the pane itself),
-		// find the most recent one.
+		// If the active view isn't a markdown editor (e.g. the pane button
+		// was clicked), find the leaf for the file the pane is tracking.
 		if (!view || !view.file || isSidecarFile(view.file.path)) {
+			const pane = this.getAnnotationPane();
+			const targetPath = pane?.getCurrentSourcePath();
+
 			for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
-				if (
-					leaf.view instanceof MarkdownView &&
-					leaf.view.file &&
-					!isSidecarFile(leaf.view.file.path)
-				) {
-					view = leaf.view as MarkdownView;
+				const v = leaf.view as MarkdownView;
+				if (!v.file || isSidecarFile(v.file.path)) continue;
+				// Prefer the pane's tracked file
+				if (targetPath && v.file.path === targetPath) {
+					view = v;
 					break;
 				}
+				// Fall back to any non-sidecar file
+				if (!view) view = v;
 			}
 		}
 
@@ -328,16 +332,45 @@ export default class MarginNotesPlugin extends Plugin {
 	// ── Split view ─────────────────────────────────────────────
 
 	async openSplitView(): Promise<void> {
-		// Find the source file — try active view, fall back to any markdown leaf
+		// Determine which source file to use:
+		// 1. The file the annotation pane is currently tracking
+		// 2. The active markdown view
+		// 3. Any open non-sidecar markdown view
 		let sourceLeaf: WorkspaceLeaf | null = null;
 		let sourceFile: TFile | null = null;
 
-		const activeView =
-			this.app.workspace.getActiveViewOfType(MarkdownView);
-		if (activeView?.file && !isSidecarFile(activeView.file.path)) {
-			sourceLeaf = activeView.leaf;
-			sourceFile = activeView.file;
-		} else {
+		const pane = this.getAnnotationPane();
+		const targetPath = pane?.getCurrentSourcePath();
+
+		// If the pane is tracking a file, find its leaf
+		if (targetPath) {
+			for (const leaf of this.app.workspace.getLeavesOfType(
+				"markdown"
+			)) {
+				const v = leaf.view as MarkdownView;
+				if (v.file?.path === targetPath) {
+					sourceLeaf = leaf;
+					sourceFile = v.file;
+					break;
+				}
+			}
+		}
+
+		// Fall back to the active markdown view
+		if (!sourceLeaf) {
+			const activeView =
+				this.app.workspace.getActiveViewOfType(MarkdownView);
+			if (
+				activeView?.file &&
+				!isSidecarFile(activeView.file.path)
+			) {
+				sourceLeaf = activeView.leaf;
+				sourceFile = activeView.file;
+			}
+		}
+
+		// Fall back to any non-sidecar markdown leaf
+		if (!sourceLeaf) {
 			for (const leaf of this.app.workspace.getLeavesOfType(
 				"markdown"
 			)) {
