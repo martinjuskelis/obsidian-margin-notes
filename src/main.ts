@@ -253,16 +253,23 @@ export default class MarginNotesPlugin extends Plugin {
 	}
 
 	async ensurePaneOpen(): Promise<void> {
-		if (this.app.workspace.getLeavesOfType(VIEW_TYPE_ANNOTATIONS).length)
+		const existing =
+			this.app.workspace.getLeavesOfType(VIEW_TYPE_ANNOTATIONS);
+		if (existing.length) {
+			this.app.workspace.revealLeaf(existing[0]);
 			return;
-
-		const leaf = this.app.workspace.getRightLeaf(false);
-		if (leaf) {
-			await leaf.setViewState({
-				type: VIEW_TYPE_ANNOTATIONS,
-				active: true,
-			});
 		}
+
+		// Try the right sidebar first; fall back to a new tab
+		let leaf = this.app.workspace.getRightLeaf(false);
+		if (!leaf) {
+			leaf = this.app.workspace.getLeaf("split");
+		}
+		await leaf.setViewState({
+			type: VIEW_TYPE_ANNOTATIONS,
+			active: true,
+		});
+		this.app.workspace.revealLeaf(leaf);
 	}
 
 	getAnnotationPane(): AnnotationPaneView | null {
