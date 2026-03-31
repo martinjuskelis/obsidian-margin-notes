@@ -39,6 +39,8 @@ export default class MarginNotesPlugin extends Plugin {
 	private cachedSourceLines: string[] | null = null;
 	/** Guard to prevent recursive notes edits. */
 	private applyingLineDiff = false;
+	/** Cached notes line count for detecting user edits in notes. */
+	private cachedNotesLineCount: number | null = null;
 
 	async onload(): Promise<void> {
 		this.scrollSync = new ScrollSync(this);
@@ -149,13 +151,13 @@ export default class MarginNotesPlugin extends Plugin {
 			})
 		);
 
-		// Track source edits to mirror line insertions/deletions to notes
+		// Track edits in both source and notes to keep lines synced
 		this.registerEvent(
 			// @ts-ignore — editor-change event typing
 			this.app.workspace.on(
 				"editor-change",
 				(editor: any, info: any) => {
-					this.onSourceEditorChange(editor, info);
+					this.onEditorChange(editor, info);
 				}
 			)
 		);
@@ -231,8 +233,11 @@ export default class MarginNotesPlugin extends Plugin {
 		this.splitSourceLeaf = sourceLeaf;
 		await this.splitLeaf.openFile(notesFile);
 
-		// 7. Cache source lines for edit tracking
+		// 7. Cache source/notes lines for edit tracking
 		this.cachedSourceLines = sourceText.split("\n");
+		// Notes line count is set after ensureNoteFileLineCount ran
+		const notesText = await this.app.vault.cachedRead(notesFile);
+		this.cachedNotesLineCount = notesText.split("\n").length;
 
 		// 8. Add link toggle button
 		this.splitSyncEnabled = true;
@@ -263,6 +268,7 @@ export default class MarginNotesPlugin extends Plugin {
 		}
 		this.splitSourceLeaf = null;
 		this.cachedSourceLines = null;
+		this.cachedNotesLineCount = null;
 		this.scrollSync.detach();
 	}
 
@@ -372,32 +378,134 @@ export default class MarginNotesPlugin extends Plugin {
 		});
 	}
 
-	// ── Source edit tracking (line sync) ───────────────────────
+	// ── Edit tracking (line sync) ──────────────────────────────
 
-	/**
-	 * Called on every keystroke in any editor. Checks if the source
-	 * file's line count changed, and if so, mirrors the line
-	 * insertion/deletion to the notes file.
-	 */
-	private onSourceEditorChange(editor: any, info: any): void {
+	/** Dispatch editor-change events to the right handler. */
+	private onEditorChange(editor: any, info: any): void {
 		if (!this.splitLeaf || !this.splitSourceLeaf) return;
-		if (!this.cachedSourceLines) return;
 		if (this.applyingLineDiff) return;
 
-		// Only process the tracked source file
+		const changedPath = info?.file?.path;
 		const sourceFile = (this.splitSourceLeaf.view as MarkdownView)
 			.file;
-		if (!sourceFile || info?.file?.path !== sourceFile.path) return;
+		const notesFile = (this.splitLeaf.view as MarkdownView).file;
 
-		// O(1) check — skip if line count hasn't changed
+		if (changedPath === sourceFile?.path) {
+			this.onSourceEditorChange(editor);
+		} else if (changedPath === notesFile?.path) {
+			this.onNotesEditorChange(editor);
+		}
+	}
+
+	/** Source file changed — mirror line insertions/deletions to notes. */
+	private onSourceEditorChange(editor: any): void {
+		if (!this.cachedSourceLines) return;
+
 		const newLineCount = editor.lineCount();
 		if (newLineCount === this.cachedSourceLines.length) return;
 
-		// Line count changed — diff and apply
 		const newLines = (editor.getValue() as string).split("\n");
 		this.applyLineDiff(this.cachedSourceLines, newLines);
 		this.cachedSourceLines = newLines;
+
+		// Keep notes cache in sync after we modified the notes file
+		if (this.splitLeaf) {
+			const nv = this.splitLeaf.view as MarkdownView;
+			this.cachedNotesLineCount = nv.editor.lineCount();
+		}
+
 		this.scheduleLineHeightRecalc();
+	}
+
+	/**
+	 * Notes file changed by user — absorb extra lines by removing
+	 * nearby blank lines, or pad if lines were deleted, so that
+	 * notes below the edit stay aligned with their source lines.
+	 */
+	private onNotesEditorChange(editor: any): void {
+		if (this.cachedNotesLineCount == null) return;
+
+		const newCount = editor.lineCount();
+		const delta = newCount - this.cachedNotesLineCount;
+		if (delta === 0) return;
+
+		this.cachedNotesLineCount = newCount;
+
+		if (delta > 0) {
+			this.absorbExtraNotesLines(editor, delta);
+		} else {
+			this.padRemovedNotesLines(editor, -delta);
+		}
+
+		this.scheduleLineHeightRecalc();
+	}
+
+	/**
+	 * User added lines in the notes file (e.g. pressed Enter to
+	 * continue a note). Find and remove the nearest blank lines
+	 * below the edit point to keep everything else aligned.
+	 */
+	private absorbExtraNotesLines(editor: any, count: number): void {
+		const cursor = editor.getCursor();
+		const searchStart = cursor.line + 1;
+
+		this.applyingLineDiff = true;
+		try {
+			let removed = 0;
+			let i = searchStart;
+			while (i < editor.lineCount() && removed < count) {
+				const text = editor.getLine(i);
+				if (text.trim() === "") {
+					if (i < editor.lineCount() - 1) {
+						editor.replaceRange(
+							"",
+							{ line: i, ch: 0 },
+							{ line: i + 1, ch: 0 }
+						);
+					} else if (i > 0) {
+						const prev = editor.getLine(i - 1);
+						editor.replaceRange(
+							"",
+							{ line: i - 1, ch: prev.length },
+							{ line: i, ch: text.length }
+						);
+					}
+					removed++;
+					// Don't increment — next line slid into position i
+				} else {
+					i++;
+				}
+			}
+			this.cachedNotesLineCount = editor.lineCount();
+		} finally {
+			this.applyingLineDiff = false;
+		}
+	}
+
+	/**
+	 * User removed lines in the notes file. Pad at the end so the
+	 * total line count stays >= source line count.
+	 */
+	private padRemovedNotesLines(editor: any, count: number): void {
+		if (!this.cachedSourceLines) return;
+
+		const notesCount = editor.lineCount();
+		const needed = this.cachedSourceLines.length - notesCount;
+		if (needed <= 0) return;
+
+		const pad = Math.min(count, needed);
+		this.applyingLineDiff = true;
+		try {
+			const lastLine = editor.lineCount() - 1;
+			const lastText = editor.getLine(lastLine);
+			editor.replaceRange(
+				"\n".repeat(pad),
+				{ line: lastLine, ch: lastText.length }
+			);
+			this.cachedNotesLineCount = editor.lineCount();
+		} finally {
+			this.applyingLineDiff = false;
+		}
 	}
 
 	/**
