@@ -5,9 +5,12 @@ import {
 	TAbstractFile,
 	WorkspaceLeaf,
 	Notice,
+	setIcon,
 } from "obsidian";
+import { EditorView } from "@codemirror/view";
 import { AnnotationPaneView, VIEW_TYPE_ANNOTATIONS } from "./pane";
 import { annotationLinePlugin } from "./cm-extension";
+import { spacerField, updateSpacers } from "./spacer";
 import { generateId, ANCHOR_RE } from "./anchor";
 import {
 	getSidecarPath,
@@ -23,6 +26,14 @@ export default class MarginNotesPlugin extends Plugin {
 	scrollSync: ScrollSync = null!;
 	/** The leaf holding the sidecar file in split view mode. */
 	private splitLeaf: WorkspaceLeaf | null = null;
+	/** The source leaf that the split view was opened from. */
+	private splitSourceLeaf: WorkspaceLeaf | null = null;
+	/** Whether scroll sync is active in split mode. */
+	private splitSyncEnabled = true;
+	/** Link toggle button element (cleaned up on close). */
+	private splitLinkBtn: HTMLElement | null = null;
+	/** Debounce timer for spacer recalculation. */
+	private spacerTimer: number | null = null;
 
 	async onload(): Promise<void> {
 		this.scrollSync = new ScrollSync(this);
@@ -33,8 +44,9 @@ export default class MarginNotesPlugin extends Plugin {
 			(leaf) => new AnnotationPaneView(leaf, this)
 		);
 
-		// ── CM6 line decorations ───────────────────────────────
+		// ── CM6 extensions ─────────────────────────────────────
 		this.registerEditorExtension(annotationLinePlugin);
+		this.registerEditorExtension(spacerField);
 
 		// ── Reading View post-processor ────────────────────────
 		this.registerMarkdownPostProcessor((el, ctx) => {
@@ -115,6 +127,18 @@ export default class MarginNotesPlugin extends Plugin {
 			this.app.workspace.on("layout-change", () => {
 				if (this.getAnnotationPane()) {
 					this.scrollSync.attach();
+				}
+				if (this.splitLeaf && this.splitSyncEnabled) {
+					this.scheduleSpacerRecalc();
+				}
+			})
+		);
+
+		// Also recalculate spacers when the window resizes
+		this.registerEvent(
+			this.app.workspace.on("resize", () => {
+				if (this.splitLeaf && this.splitSyncEnabled) {
+					this.scheduleSpacerRecalc();
 				}
 			})
 		);
@@ -351,26 +375,179 @@ export default class MarginNotesPlugin extends Plugin {
 			sourceLeaf,
 			"vertical"
 		);
+		this.splitSourceLeaf = sourceLeaf;
 		await this.splitLeaf.openFile(sidecarFile);
 
-		// Set up scroll sync after the DOM settles
-		const self = this;
+		// Add link toggle button to the sidecar view header
+		this.addLinkToggle();
+
+		// After DOM settles: calculate spacers, then attach scroll sync
+		this.splitSyncEnabled = true;
 		setTimeout(() => {
-			if (!self.splitLeaf || !sourceLeaf) return;
-			const srcEl = self.getLeafScrollContainer(sourceLeaf);
-			const scEl = self.getLeafScrollContainer(self.splitLeaf);
-			if (srcEl && scEl) {
-				self.scrollSync.attachToElements(srcEl, scEl);
-			}
-		}, 250);
+			this.recalculateSpacers();
+			setTimeout(() => this.attachSplitSync(), 100);
+		}, 300);
 	}
 
 	closeSplitView(): void {
+		if (this.splitLinkBtn) {
+			this.splitLinkBtn.remove();
+			this.splitLinkBtn = null;
+		}
+		// Clear spacers before closing
 		if (this.splitLeaf) {
+			const cv = this.getCmView(this.splitLeaf);
+			if (cv) {
+				cv.dispatch({
+					effects: updateSpacers.of(new Map()),
+				});
+			}
 			this.splitLeaf.detach();
 			this.splitLeaf = null;
-			this.scrollSync.detach();
 		}
+		this.splitSourceLeaf = null;
+		this.scrollSync.detach();
+	}
+
+	private attachSplitSync(): void {
+		if (
+			!this.splitLeaf ||
+			!this.splitSourceLeaf ||
+			!this.splitSyncEnabled
+		)
+			return;
+		const srcEl = this.getLeafScrollContainer(this.splitSourceLeaf);
+		const scEl = this.getLeafScrollContainer(this.splitLeaf);
+		if (srcEl && scEl) {
+			this.scrollSync.attachToElements(srcEl, scEl);
+		}
+	}
+
+	// ── Link toggle button ─────────────────────────────────────
+
+	private addLinkToggle(): void {
+		if (!this.splitLeaf) return;
+		const actions =
+			this.splitLeaf.view.containerEl.querySelector(".view-actions");
+		if (!actions) return;
+
+		const btn = document.createElement("a");
+		btn.className = "view-action margin-notes-link-toggle is-linked";
+		btn.setAttribute("aria-label", "Scroll sync (linked)");
+		setIcon(btn, "link");
+		actions.prepend(btn);
+		this.splitLinkBtn = btn;
+
+		btn.addEventListener("click", () => {
+			this.splitSyncEnabled = !this.splitSyncEnabled;
+			if (this.splitSyncEnabled) {
+				setIcon(btn, "link");
+				btn.classList.add("is-linked");
+				btn.classList.remove("is-unlinked");
+				btn.setAttribute("aria-label", "Scroll sync (linked)");
+				this.recalculateSpacers();
+				setTimeout(() => this.attachSplitSync(), 100);
+			} else {
+				setIcon(btn, "unlink");
+				btn.classList.remove("is-linked");
+				btn.classList.add("is-unlinked");
+				btn.setAttribute("aria-label", "Scroll sync (unlinked)");
+				this.scrollSync.detach();
+				// Remove spacers
+				const cv = this.splitLeaf
+					? this.getCmView(this.splitLeaf)
+					: null;
+				if (cv) {
+					cv.dispatch({
+						effects: updateSpacers.of(new Map()),
+					});
+				}
+			}
+		});
+	}
+
+	// ── Spacer calculation ─────────────────────────────────────
+
+	private scheduleSpacerRecalc(): void {
+		if (this.spacerTimer) window.clearTimeout(this.spacerTimer);
+		this.spacerTimer = window.setTimeout(() => {
+			this.spacerTimer = null;
+			this.recalculateSpacers();
+		}, 250);
+	}
+
+	/**
+	 * Measure both editors and insert spacer widgets in the sidecar
+	 * so that each annotation aligns vertically with its source paragraph.
+	 */
+	private recalculateSpacers(): void {
+		if (!this.splitLeaf || !this.splitSourceLeaf) return;
+		if (!this.splitSyncEnabled) return;
+
+		const sourceCV = this.getCmView(this.splitSourceLeaf);
+		const sidecarCV = this.getCmView(this.splitLeaf);
+		if (!sourceCV || !sidecarCV) return;
+
+		// 1. Clear existing spacers so measurements are "natural"
+		sidecarCV.dispatch({
+			effects: updateSpacers.of(new Map()),
+		});
+		// Force synchronous layout reflow
+		sidecarCV.dom.getBoundingClientRect();
+
+		// 2. Measure anchor positions in both editors
+		const sourceAnchors = this.measureAnchors(sourceCV);
+		const sidecarAnchors = this.measureAnchors(sidecarCV);
+
+		// 3. Calculate spacer heights (top-down, accumulating)
+		const spacers = new Map<string, number>();
+		let accumulated = 0;
+
+		for (const sc of sidecarAnchors) {
+			const src = sourceAnchors.find((a) => a.id === sc.id);
+			if (!src) continue;
+
+			const targetY = src.top;
+			const currentY = sc.top + accumulated;
+			const spacer = Math.max(0, targetY - currentY);
+
+			if (spacer > 0) {
+				spacers.set(sc.id, spacer);
+				accumulated += spacer;
+			}
+		}
+
+		// 4. Apply spacers
+		sidecarCV.dispatch({
+			effects: updateSpacers.of(spacers),
+		});
+	}
+
+	private measureAnchors(
+		view: EditorView
+	): { id: string; top: number }[] {
+		const RE = /<!-- ann:(\w+) -->/;
+		const result: { id: string; top: number }[] = [];
+		const doc = view.state.doc;
+
+		for (let i = 1; i <= doc.lines; i++) {
+			const line = doc.line(i);
+			const m = RE.exec(line.text);
+			if (m) {
+				const block = view.lineBlockAt(line.from);
+				result.push({ id: m[1], top: block.top });
+			}
+		}
+		return result;
+	}
+
+	// ── Helpers ────────────────────────────────────────────────
+
+	/** Get the CM6 EditorView for a MarkdownView leaf. */
+	private getCmView(leaf: WorkspaceLeaf): EditorView | null {
+		if (!(leaf.view instanceof MarkdownView)) return null;
+		// @ts-ignore — accessing internal CM6 editor view
+		return (leaf.view.editor as any).cm ?? null;
 	}
 
 	private getLeafScrollContainer(
@@ -474,16 +651,18 @@ export default class MarginNotesPlugin extends Plugin {
 	private onFileModified(file: TAbstractFile): void {
 		if (!(file instanceof TFile)) return;
 
+		// Comments pane: reload if sidecar changed externally
 		const pane = this.getAnnotationPane();
-		if (!pane) return;
-
-		// If the sidecar for the current source was modified externally,
-		// reload the pane (unless we triggered the modification ourselves).
-		if (isSidecarFile(file.path) && !pane.getSuppressReload()) {
+		if (pane && isSidecarFile(file.path) && !pane.getSuppressReload()) {
 			const sourcePath = file.path.replace(/\.ann\.md$/, ".md");
 			if (pane.getCurrentSourcePath() === sourcePath) {
 				pane.loadForFile(sourcePath);
 			}
+		}
+
+		// Split view: recalculate spacers when either file changes
+		if (this.splitLeaf && this.splitSyncEnabled) {
+			this.scheduleSpacerRecalc();
 		}
 	}
 

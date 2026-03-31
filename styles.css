@@ -228,3 +228,28 @@
 		background: var(--background-secondary);
 	}
 }
+
+/* ── Spacer widgets (split view alignment) ───────────────────────── */
+
+.margin-notes-spacer {
+	pointer-events: none;
+	user-select: none;
+}
+
+/* ── Link toggle button (split view header) ──────────────────────── */
+
+.margin-notes-link-toggle {
+	cursor: pointer;
+	opacity: 0.7;
+	transition: opacity 0.15s ease, color 0.15s ease;
+}
+.margin-notes-link-toggle:hover {
+	opacity: 1;
+}
+.margin-notes-link-toggle.is-linked {
+	color: var(--interactive-accent);
+	opacity: 1;
+}
+.margin-notes-link-toggle.is-unlinked {
+	color: var(--text-faint);
+}
