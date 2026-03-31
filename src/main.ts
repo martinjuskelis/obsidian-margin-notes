@@ -17,6 +17,7 @@ import {
 	isSidecarFile,
 	parseSidecar,
 	serializeSidecar,
+	sortAnnotationsBySource,
 } from "./sidecar";
 import type { SidecarData } from "./sidecar";
 import { ScrollSync } from "./sync";
@@ -245,6 +246,15 @@ export default class MarginNotesPlugin extends Plugin {
 		const sidecarPath = getSidecarPath(sourcePath);
 		const sidecar = await this.loadSidecar(sidecarPath, sourcePath);
 		sidecar.annotations.push({ anchorId, content: "" });
+
+		// Sort annotations to match their order in the source document
+		const sourceFile =
+			this.app.vault.getAbstractFileByPath(sourcePath);
+		if (sourceFile instanceof TFile) {
+			const sourceText = await this.app.vault.cachedRead(sourceFile);
+			sortAnnotationsBySource(sidecar, sourceText);
+		}
+
 		await this.saveSidecar(sidecarPath, sidecar);
 	}
 
@@ -634,11 +644,13 @@ export default class MarginNotesPlugin extends Plugin {
 			}
 		}
 
-		// 3. After the viewport renders the target, highlight it
+		// 3. After the viewport renders the target, highlight it.
+		//    Use "nearest" so we don't fight the initial scroll for
+		//    elements near the bottom that can't be centered.
 		setTimeout(() => {
 			const el2 = this.findSourceElement(anchorId);
 			if (el2) {
-				el2.scrollIntoView({ behavior: "smooth", block: "center" });
+				el2.scrollIntoView({ behavior: "smooth", block: "nearest" });
 				this.flashElement(el2);
 			}
 		}, 250);

@@ -64,6 +64,28 @@ export function parseSidecar(content: string): SidecarData {
 	return { source, annotations };
 }
 
+/**
+ * Sort annotations to match the order their anchors appear in the source text.
+ * Annotations whose anchors are not found in the source are placed at the end.
+ */
+export function sortAnnotationsBySource(
+	data: SidecarData,
+	sourceText: string
+): void {
+	const lines = sourceText.split("\n");
+	const anchorOrder = new Map<string, number>();
+	const re = /<!-- ann:(\w+) -->/;
+	for (let i = 0; i < lines.length; i++) {
+		const m = re.exec(lines[i]);
+		if (m) anchorOrder.set(m[1], i);
+	}
+	data.annotations.sort((a, b) => {
+		const ai = anchorOrder.get(a.anchorId) ?? Infinity;
+		const bi = anchorOrder.get(b.anchorId) ?? Infinity;
+		return ai - bi;
+	});
+}
+
 export function serializeSidecar(data: SidecarData): string {
 	let out = `---\nsource: "${data.source}"\n---\n`;
 	for (const ann of data.annotations) {

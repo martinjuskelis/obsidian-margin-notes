@@ -16,7 +16,7 @@ import {
 	setIcon,
 } from "obsidian";
 import type MarginNotesPlugin from "./main";
-import { parseSidecar, serializeSidecar, getSidecarPath, isSidecarFile } from "./sidecar";
+import { parseSidecar, serializeSidecar, getSidecarPath, isSidecarFile, sortAnnotationsBySource } from "./sidecar";
 import type { SidecarData, Annotation } from "./sidecar";
 
 export const VIEW_TYPE_ANNOTATIONS = "margin-notes-view";
@@ -344,6 +344,15 @@ export class AnnotationPaneView extends ItemView {
 
 	private async saveSidecar(): Promise<void> {
 		if (!this.sidecar || !this.currentSourcePath) return;
+
+		// Sort annotations to match source document order
+		const sourceFile = this.app.vault.getAbstractFileByPath(
+			this.currentSourcePath
+		);
+		if (sourceFile instanceof TFile) {
+			const sourceText = await this.app.vault.cachedRead(sourceFile);
+			sortAnnotationsBySource(this.sidecar, sourceText);
+		}
 
 		this.suppressReload = true;
 		const path = getSidecarPath(this.currentSourcePath);
