@@ -197,12 +197,15 @@ export class MarginNotesView extends ItemView {
 		}
 	}
 
-	/** Check if the correct source tab is currently active. */
-	private isSourceActive(): boolean {
-		if (!this.plugin.splitSourceLeaf) return false;
-		const active =
-			this.app.workspace.getActiveViewOfType(MarkdownView);
-		return active?.leaf === this.plugin.splitSourceLeaf;
+	/** Check if the source leaf is still open with the correct file. */
+	private isSourceAvailable(): boolean {
+		if (!this.plugin.splitSourceLeaf || !this.sourcePath)
+			return false;
+		const v = this.plugin.splitSourceLeaf.view;
+		return (
+			v instanceof MarkdownView &&
+			v.file?.path === this.sourcePath
+		);
 	}
 
 	repositionSlots(): void {
@@ -306,17 +309,27 @@ export class MarginNotesView extends ItemView {
 	}
 
 	focusSlot(anchorId: string): void {
+		// Wait for renderSlots + positioning to finish, then focus
 		setTimeout(() => {
 			if (this.linked) this.repositionSlots();
-			const slot = this.slots.get(anchorId);
-			if (slot) {
-				slot.scrollIntoView({
-					behavior: "smooth",
-					block: "center",
-				});
-				this.startEditing(anchorId);
-			}
-		}, 200);
+			setTimeout(() => {
+				const slot = this.slots.get(anchorId);
+				if (slot) {
+					slot.scrollIntoView({
+						behavior: "smooth",
+						block: "center",
+					});
+					this.startEditing(anchorId);
+					// Extra focus attempt after scroll settles
+					setTimeout(() => {
+						const ta = slot.querySelector(
+							".mn-slot-editor"
+						) as HTMLTextAreaElement | null;
+						if (ta) ta.focus();
+					}, 100);
+				}
+			}, 50);
+		}, 300);
 	}
 
 	isSuppressingReload(): boolean {
@@ -330,9 +343,9 @@ export class MarginNotesView extends ItemView {
 	// ── Link toggle ────────────────────────────────────────────
 
 	private toggleLinked(): void {
-		if (!this.linked && !this.isSourceActive()) {
+		if (!this.linked && !this.isSourceAvailable()) {
 			new Notice(
-				"Switch to the source document tab to link"
+				"Source document is not open"
 			);
 			return;
 		}

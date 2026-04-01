@@ -20,11 +20,17 @@ import {
 } from "./sidecar";
 import type { SidecarData } from "./sidecar";
 import { exportToHtml } from "./exporter";
+import {
+	MarginNotesSettingTab,
+	DEFAULT_SETTINGS,
+} from "./settings";
+import type { MarginNotesSettings } from "./settings";
 
 // Keep the old pane for mobile card view
 import { AnnotationPaneView, VIEW_TYPE_ANNOTATIONS } from "./pane";
 
 export default class MarginNotesPlugin extends Plugin {
+	settings: MarginNotesSettings = DEFAULT_SETTINGS;
 	/** The leaf holding the custom notes view. */
 	splitLeaf: WorkspaceLeaf | null = null;
 	/** The source leaf the notes view is paired with. */
@@ -33,6 +39,12 @@ export default class MarginNotesPlugin extends Plugin {
 	private repositionTimer: number | null = null;
 
 	async onload(): Promise<void> {
+		// ── Settings ───────────────────────────────────────────
+		await this.loadSettings();
+		this.addSettingTab(
+			new MarginNotesSettingTab(this.app, this)
+		);
+
 		// ── Views ──────────────────────────────────────────────
 		this.registerView(
 			VIEW_TYPE_NOTES,
@@ -143,9 +155,20 @@ export default class MarginNotesPlugin extends Plugin {
 	}
 
 	onunload(): void {
-		this.getNotesView()
-			?.getScrollContainer()
-			?.dispatchEvent(new Event("scroll")); // trigger cleanup
+		document.body.classList.remove("mn-no-highlights");
+	}
+
+	async loadSettings(): Promise<void> {
+		this.settings = Object.assign(
+			{},
+			DEFAULT_SETTINGS,
+			await this.loadData()
+		);
+		this.updateHighlightVisibility();
+	}
+
+	async saveSettings(): Promise<void> {
+		await this.saveData(this.settings);
 	}
 
 	// ── Toggle ─────────────────────────────────────────────────
@@ -353,6 +376,7 @@ export default class MarginNotesPlugin extends Plugin {
 	// ── Source highlighting ────────────────────────────────────
 
 	highlightSource(anchorId: string): void {
+		if (!this.settings.showSourceHighlight) return;
 		const el = this.findSourceEl(anchorId);
 		if (el) el.classList.add("margin-notes-highlight");
 	}
@@ -360,6 +384,15 @@ export default class MarginNotesPlugin extends Plugin {
 	unhighlightSource(anchorId: string): void {
 		const el = this.findSourceEl(anchorId);
 		if (el) el.classList.remove("margin-notes-highlight");
+	}
+
+	/** Toggle CSS class on body to show/hide static anchor highlights. */
+	updateHighlightVisibility(): void {
+		if (this.settings.showSourceHighlight) {
+			document.body.classList.remove("mn-no-highlights");
+		} else {
+			document.body.classList.add("mn-no-highlights");
+		}
 	}
 
 	scrollSourceToAnchor(anchorId: string): void {
@@ -511,17 +544,23 @@ export default class MarginNotesPlugin extends Plugin {
 				pane.loadForFile(file.path);
 		}
 
-		// Update notes view link state — only sync when the
-		// correct source tab is active on the left
+		// Update notes view link state — detach sync only when a
+		// DIFFERENT markdown file is focused (not when the notes
+		// pane itself gets focus)
 		const nv = this.getNotesView();
 		if (nv && this.splitSourceLeaf) {
-			const activeLeaf =
+			const activeMd =
 				this.app.workspace.getActiveViewOfType(
 					MarkdownView
-				)?.leaf;
-			const isCorrect =
-				activeLeaf === this.splitSourceLeaf;
-			nv.updateLinkState(isCorrect);
+				);
+			if (activeMd) {
+				// A markdown file is active — check if it's the right one
+				const isCorrect =
+					activeMd.leaf === this.splitSourceLeaf;
+				nv.updateLinkState(isCorrect);
+			}
+			// If no markdown view is active (e.g. notes pane clicked),
+			// don't change the link state
 		}
 	}
 
