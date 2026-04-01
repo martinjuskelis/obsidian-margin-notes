@@ -1,10 +1,9 @@
 /**
- * Annotation side pane.
+ * Card-based annotation pane (mobile / sidebar).
  *
- * A custom ItemView that opens on the right side of the workspace, showing
- * annotation cards for the currently active source document.  Each card
- * renders its markdown content via MarkdownRenderer and can be clicked to
- * switch into edit mode (a textarea).
+ * Shows annotations as tappable cards with rendered markdown.
+ * Tap a card to edit it inline. Controls are always visible
+ * (no hover dependency — works on touch devices).
  */
 
 import {
@@ -13,10 +12,17 @@ import {
 	MarkdownRenderer,
 	Component,
 	TFile,
+	Platform,
 	setIcon,
 } from "obsidian";
 import type MarginNotesPlugin from "./main";
-import { parseSidecar, serializeSidecar, getSidecarPath, isSidecarFile, sortAnnotationsBySource } from "./sidecar";
+import {
+	parseSidecar,
+	serializeSidecar,
+	getSidecarPath,
+	isSidecarFile,
+	sortAnnotationsBySource,
+} from "./sidecar";
 import type { SidecarData, Annotation } from "./sidecar";
 
 export const VIEW_TYPE_ANNOTATIONS = "margin-notes-view";
@@ -25,11 +31,9 @@ export class AnnotationPaneView extends ItemView {
 	private plugin: MarginNotesPlugin;
 	private sidecar: SidecarData | null = null;
 	private currentSourcePath: string | null = null;
-	private scrollEl: HTMLElement = null!;
 	private cardsEl: HTMLElement = null!;
 	private editingId: string | null = null;
 	private renderComponents: Map<string, Component> = new Map();
-	/** Suppress sidecar-modify reloads while we are saving ourselves. */
 	private suppressReload = false;
 
 	constructor(leaf: WorkspaceLeaf, plugin: MarginNotesPlugin) {
@@ -54,24 +58,39 @@ export class AnnotationPaneView extends ItemView {
 
 		// ── Header ─────────────────────────────────────────────
 		const header = root.createDiv("margin-notes-header");
-		header.createSpan({ text: "Margin Notes", cls: "margin-notes-title" });
+		header.createSpan({
+			text: "Margin Notes",
+			cls: "margin-notes-title",
+		});
 
 		const buttons = header.createDiv("margin-notes-header-buttons");
 
-		const splitBtn = buttons.createEl("button", {
+		// Add note button
+		const addBtn = buttons.createEl("button", {
 			cls: "margin-notes-header-btn clickable-icon",
-			attr: { "aria-label": "Open side-by-side view" },
+			attr: { "aria-label": "Add margin note" },
 		});
-		setIcon(splitBtn, "columns-2");
-		splitBtn.addEventListener("click", () =>
-			this.plugin.openSplit()
+		setIcon(addBtn, "plus");
+		addBtn.addEventListener("click", () =>
+			this.plugin.addAnnotationFromPane()
 		);
 
-		// ── Scrollable card container ──────────────────────────
-		this.scrollEl = root.createDiv("margin-notes-content");
-		this.cardsEl = this.scrollEl;
+		// Desktop-only: switch to split view
+		if (!Platform.isMobile) {
+			const splitBtn = buttons.createEl("button", {
+				cls: "margin-notes-header-btn clickable-icon",
+				attr: { "aria-label": "Open side-by-side view" },
+			});
+			setIcon(splitBtn, "columns-2");
+			splitBtn.addEventListener("click", () =>
+				this.plugin.openSplit()
+			);
+		}
 
-		// Load for whatever file is currently open
+		// ── Card container ─────────────────────────────────────
+		this.cardsEl = root.createDiv("margin-notes-content");
+
+		// Load for current file
 		const activeFile = this.app.workspace.getActiveFile();
 		if (activeFile && !isSidecarFile(activeFile.path)) {
 			await this.loadForFile(activeFile.path);
@@ -88,39 +107,39 @@ export class AnnotationPaneView extends ItemView {
 		return this.currentSourcePath;
 	}
 
-	getScrollContainer(): HTMLElement {
-		return this.scrollEl;
-	}
-
-	getCardElement(anchorId: string): HTMLElement | null {
-		return this.cardsEl.querySelector(`[data-ann-id="${anchorId}"]`);
-	}
-
 	getSuppressReload(): boolean {
 		return this.suppressReload;
 	}
 
-	/**
-	 * Load (or reload) annotations for a given source file.
-	 * Skips if already showing that file and we are mid-edit.
-	 */
+	getCardElement(anchorId: string): HTMLElement | null {
+		return this.cardsEl.querySelector(
+			`[data-ann-id="${anchorId}"]`
+		);
+	}
+
+	getAnnotations(): Annotation[] {
+		return this.sidecar?.annotations ?? [];
+	}
+
 	async loadForFile(sourcePath: string): Promise<void> {
 		if (
 			this.currentSourcePath === sourcePath &&
 			this.editingId &&
 			!this.suppressReload
 		) {
-			return; // don't clobber an in-progress edit
+			return;
 		}
 
 		this.currentSourcePath = sourcePath;
 
 		const sidecarPath = getSidecarPath(sourcePath);
-		const file = this.app.vault.getAbstractFileByPath(sidecarPath);
+		const file =
+			this.app.vault.getAbstractFileByPath(sidecarPath);
 
 		if (file instanceof TFile) {
-			const raw = await this.app.vault.cachedRead(file);
-			this.sidecar = parseSidecar(raw);
+			this.sidecar = parseSidecar(
+				await this.app.vault.cachedRead(file)
+			);
 		} else {
 			this.sidecar = { source: sourcePath, annotations: [] };
 		}
@@ -129,13 +148,14 @@ export class AnnotationPaneView extends ItemView {
 		this.render();
 	}
 
-	/** Scroll to and open the editor for a specific annotation. */
 	focusAnnotation(anchorId: string): void {
-		// Small delay lets the DOM settle after render()
 		setTimeout(() => {
 			const card = this.getCardElement(anchorId);
 			if (!card) return;
-			card.scrollIntoView({ behavior: "smooth", block: "center" });
+			card.scrollIntoView({
+				behavior: "smooth",
+				block: "center",
+			});
 			this.startEditing(anchorId, card);
 		}, 80);
 	}
@@ -146,10 +166,18 @@ export class AnnotationPaneView extends ItemView {
 		this.cleanupComponents();
 		this.cardsEl.empty();
 
-		if (!this.sidecar || this.sidecar.annotations.length === 0) {
-			this.cardsEl.createDiv({
-				cls: "margin-notes-empty",
-				text: "No annotations yet. Click + or use the command palette to add one.",
+		if (
+			!this.sidecar ||
+			this.sidecar.annotations.length === 0
+		) {
+			const empty = this.cardsEl.createDiv("margin-notes-empty");
+			empty.createDiv({
+				text: "No annotations yet.",
+				cls: "margin-notes-empty-text",
+			});
+			empty.createDiv({
+				text: "Place your cursor in the source document and tap + above to add one.",
+				cls: "margin-notes-empty-hint",
 			});
 			return;
 		}
@@ -165,11 +193,11 @@ export class AnnotationPaneView extends ItemView {
 			attr: { "data-ann-id": ann.anchorId },
 		});
 
-		// ── Card toolbar (visible on hover) ────────────────────
-		const toolbar = card.createDiv("margin-notes-card-toolbar");
+		// ── Always-visible action row ──────────────────────────
+		const actions = card.createDiv("mn-card-actions");
 
-		const editBtn = toolbar.createEl("button", {
-			cls: "margin-notes-card-btn clickable-icon",
+		const editBtn = actions.createEl("button", {
+			cls: "mn-card-action clickable-icon",
 			attr: { "aria-label": "Edit" },
 		});
 		setIcon(editBtn, "pencil");
@@ -178,9 +206,9 @@ export class AnnotationPaneView extends ItemView {
 			this.startEditing(ann.anchorId, card);
 		});
 
-		const deleteBtn = toolbar.createEl("button", {
-			cls: "margin-notes-card-btn margin-notes-delete-btn clickable-icon",
-			attr: { "aria-label": "Delete annotation" },
+		const deleteBtn = actions.createEl("button", {
+			cls: "mn-card-action mn-card-action-delete clickable-icon",
+			attr: { "aria-label": "Delete" },
 		});
 		setIcon(deleteBtn, "trash-2");
 		deleteBtn.addEventListener("click", (e) => {
@@ -189,7 +217,9 @@ export class AnnotationPaneView extends ItemView {
 		});
 
 		// ── Card content ───────────────────────────────────────
-		const contentDiv = card.createDiv("margin-notes-card-content");
+		const contentDiv = card.createDiv(
+			"margin-notes-card-content"
+		);
 
 		if (ann.content.trim()) {
 			const comp = new Component();
@@ -205,30 +235,36 @@ export class AnnotationPaneView extends ItemView {
 		} else {
 			contentDiv.createDiv({
 				cls: "margin-notes-placeholder",
-				text: "Click the pencil to add content.",
+				text: "Tap the pencil to add content.",
 			});
 		}
 
-		// ── Hover / click highlighting ─────────────────────────
+		// ── Tap to scroll source (desktop) / edit (mobile) ────
+		card.addEventListener("click", () => {
+			if (Platform.isMobile) {
+				this.startEditing(ann.anchorId, card);
+			} else {
+				this.plugin.scrollSourceToAnchor(ann.anchorId);
+			}
+		});
+
+		// Hover highlighting (desktop only — harmless on mobile)
 		card.addEventListener("mouseenter", () =>
 			this.plugin.highlightSource(ann.anchorId)
 		);
 		card.addEventListener("mouseleave", () =>
 			this.plugin.unhighlightSource(ann.anchorId)
 		);
-		card.addEventListener("click", () =>
-			this.plugin.scrollSourceToAnchor(ann.anchorId)
-		);
 	}
 
 	// ── Editing ────────────────────────────────────────────────
 
-	private startEditing(anchorId: string, card: HTMLElement): void {
+	private startEditing(
+		anchorId: string,
+		card: HTMLElement
+	): void {
 		if (this.editingId === anchorId) return;
-		// If editing something else, save it first
-		if (this.editingId) {
-			this.commitEditing();
-		}
+		if (this.editingId) this.commitEditing();
 		this.editingId = anchorId;
 
 		const ann = this.sidecar?.annotations.find(
@@ -247,16 +283,30 @@ export class AnnotationPaneView extends ItemView {
 			cls: "margin-notes-editor",
 		});
 		textarea.value = ann.content;
-		textarea.rows = Math.max(4, ann.content.split("\n").length + 1);
+		textarea.placeholder = "Type your note...";
+		textarea.rows = Math.max(
+			3,
+			ann.content.split("\n").length + 1
+		);
 		textarea.focus();
 
-		const buttons = contentDiv.createDiv("margin-notes-editor-buttons");
+		// Auto-resize
+		const autoResize = () => {
+			textarea.style.height = "auto";
+			textarea.style.height = `${textarea.scrollHeight}px`;
+		};
+		autoResize();
+		textarea.addEventListener("input", autoResize);
 
-		const saveBtn = buttons.createEl("button", {
+		const btnRow = contentDiv.createDiv(
+			"margin-notes-editor-buttons"
+		);
+
+		const saveBtn = btnRow.createEl("button", {
 			text: "Save",
 			cls: "margin-notes-save-btn",
 		});
-		const cancelBtn = buttons.createEl("button", {
+		const cancelBtn = btnRow.createEl("button", {
 			text: "Cancel",
 			cls: "margin-notes-cancel-btn",
 		});
@@ -284,11 +334,11 @@ export class AnnotationPaneView extends ItemView {
 
 		textarea.addEventListener("keydown", (e) => {
 			if (e.key === "Escape") cancel();
-			if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) save();
+			if (e.key === "Enter" && (e.ctrlKey || e.metaKey))
+				save();
 		});
 	}
 
-	/** If a textarea is currently open, save its contents. */
 	private commitEditing(): void {
 		if (!this.editingId || !this.sidecar) return;
 		const textarea = this.cardsEl.querySelector(
@@ -306,16 +356,17 @@ export class AnnotationPaneView extends ItemView {
 
 	// ── Deletion ───────────────────────────────────────────────
 
-	private async deleteAnnotation(anchorId: string): Promise<void> {
+	private async deleteAnnotation(
+		anchorId: string
+	): Promise<void> {
 		if (!this.sidecar || !this.currentSourcePath) return;
 
-		// Remove from sidecar data
-		this.sidecar.annotations = this.sidecar.annotations.filter(
-			(a) => a.anchorId !== anchorId
-		);
+		this.sidecar.annotations =
+			this.sidecar.annotations.filter(
+				(a) => a.anchorId !== anchorId
+			);
 		await this.saveSidecar();
 
-		// Remove anchor from source file
 		const src = this.app.vault.getAbstractFileByPath(
 			this.currentSourcePath
 		);
@@ -323,9 +374,8 @@ export class AnnotationPaneView extends ItemView {
 			const { removeAnchor } = await import("./anchor");
 			const text = await this.app.vault.read(src);
 			const cleaned = removeAnchor(text, anchorId);
-			if (cleaned !== text) {
+			if (cleaned !== text)
 				await this.app.vault.modify(src, cleaned);
-			}
 		}
 
 		this.render();
@@ -336,12 +386,12 @@ export class AnnotationPaneView extends ItemView {
 	private async saveSidecar(): Promise<void> {
 		if (!this.sidecar || !this.currentSourcePath) return;
 
-		// Sort annotations to match source document order
 		const sourceFile = this.app.vault.getAbstractFileByPath(
 			this.currentSourcePath
 		);
 		if (sourceFile instanceof TFile) {
-			const sourceText = await this.app.vault.cachedRead(sourceFile);
+			const sourceText =
+				await this.app.vault.cachedRead(sourceFile);
 			sortAnnotationsBySource(this.sidecar, sourceText);
 		}
 
@@ -349,14 +399,14 @@ export class AnnotationPaneView extends ItemView {
 		const path = getSidecarPath(this.currentSourcePath);
 		const content = serializeSidecar(this.sidecar);
 
-		const existing = this.app.vault.getAbstractFileByPath(path);
+		const existing =
+			this.app.vault.getAbstractFileByPath(path);
 		if (existing instanceof TFile) {
 			await this.app.vault.modify(existing, content);
 		} else {
 			await this.app.vault.create(path, content);
 		}
 
-		// Allow reloads again after a short window for the modify event to fire
 		setTimeout(() => {
 			this.suppressReload = false;
 		}, 300);
@@ -365,9 +415,8 @@ export class AnnotationPaneView extends ItemView {
 	// ── Cleanup ────────────────────────────────────────────────
 
 	private cleanupComponents(): void {
-		for (const comp of this.renderComponents.values()) {
+		for (const comp of this.renderComponents.values())
 			comp.unload();
-		}
 		this.renderComponents.clear();
 	}
 }

@@ -373,6 +373,41 @@ export default class MarginNotesPlugin extends Plugin {
 		return null;
 	}
 
+	/** Called from the mobile card pane's "+" button. */
+	async addAnnotationFromPane(): Promise<void> {
+		const pane = this.getAnnotationPane();
+		const targetPath = pane?.getCurrentSourcePath();
+		if (!targetPath) {
+			new Notice("Open a document first");
+			return;
+		}
+
+		for (const l of this.app.workspace.getLeavesOfType(
+			"markdown"
+		)) {
+			const v = l.view as MarkdownView;
+			if (v.file?.path === targetPath) {
+				await this.addAnnotation(v);
+				// Refresh the card pane after adding
+				if (pane) {
+					await pane.loadForFile(targetPath);
+					// Focus the last annotation (the new one)
+					const anns = pane.getAnnotations();
+					if (anns.length > 0) {
+						pane.focusAnnotation(
+							anns[anns.length - 1].anchorId
+						);
+					}
+				}
+				return;
+			}
+		}
+
+		new Notice(
+			"Place your cursor in the source document first"
+		);
+	}
+
 	// ── Helpers ────────────────────────────────────────────────
 
 	getNotesView(): MarginNotesView | null {

@@ -165,6 +165,7 @@
 	overflow: hidden;
 	transition: border-color 0.15s ease, box-shadow 0.15s ease;
 	cursor: pointer;
+	position: relative;
 }
 
 .margin-notes-card:hover {
@@ -172,15 +173,37 @@
 	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
 }
 
-.margin-notes-card-toolbar {
+/* Always-visible action buttons (touch-friendly) */
+.mn-card-actions {
+	position: absolute;
+	top: 4px;
+	right: 4px;
 	display: flex;
-	justify-content: flex-end;
 	gap: 2px;
-	padding: 2px 6px;
-	opacity: 0;
-	height: 0;
-	overflow: hidden;
-	transition: opacity 0.15s ease, height 0.15s ease;
+	z-index: 1;
+}
+
+.mn-card-action {
+	width: 28px;
+	height: 28px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 4px;
+	color: var(--text-faint);
+	cursor: pointer;
+}
+.mn-card-action:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+.mn-card-action-delete:hover {
+	color: var(--text-error);
+}
+
+/* Legacy toolbar (unused but kept for compat) */
+.margin-notes-card-toolbar {
+	display: none;
 }
 
 .margin-notes-card:hover .margin-notes-card-toolbar {
@@ -220,10 +243,18 @@
 }
 
 .margin-notes-empty {
-	color: var(--text-faint);
 	text-align: center;
 	padding: 32px 16px;
-	font-size: 0.9em;
+}
+.margin-notes-empty-text {
+	color: var(--text-muted);
+	font-size: 1em;
+	margin-bottom: 8px;
+}
+.margin-notes-empty-hint {
+	color: var(--text-faint);
+	font-size: 0.85em;
+	line-height: 1.5;
 }
 
 .margin-notes-editing {
