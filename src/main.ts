@@ -96,6 +96,19 @@ export default class MarginNotesPlugin extends Plugin {
 			callback: () => this.exportCurrentFile(),
 		});
 
+		// ── Right-click context menu ───────────────────────────
+		this.registerEvent(
+			this.app.workspace.on("editor-menu", (menu, editor, view) => {
+				if (view instanceof MarkdownView && view.file && !isSidecarFile(view.file.path)) {
+					menu.addItem((item) => {
+						item.setTitle("Add margin note")
+							.setIcon("message-square")
+							.onClick(() => this.addAnnotation(view));
+					});
+				}
+			})
+		);
+
 		// ── Ribbon ─────────────────────────────────────────────
 		this.addRibbonIcon("columns-2", "Toggle margin notes", () =>
 			this.toggle()
@@ -488,6 +501,19 @@ export default class MarginNotesPlugin extends Plugin {
 				file.path.endsWith(".md")
 			)
 				pane.loadForFile(file.path);
+		}
+
+		// Update notes view link state — only sync when the
+		// correct source tab is active on the left
+		const nv = this.getNotesView();
+		if (nv && this.splitSourceLeaf) {
+			const activeLeaf =
+				this.app.workspace.getActiveViewOfType(
+					MarkdownView
+				)?.leaf;
+			const isCorrect =
+				activeLeaf === this.splitSourceLeaf;
+			nv.updateLinkState(isCorrect);
 		}
 	}
 

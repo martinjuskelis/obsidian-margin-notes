@@ -1,14 +1,12 @@
 /**
  * Custom notes view with positioned annotation slots.
  *
- * Each annotation is rendered as an editable textarea absolutely
- * positioned to align with its source anchor.  The user clicks on
- * empty space to create a new note, types directly in the slot, and
- * the content auto-saves on idle.
- *
- * This replaces the old approach of opening the sidecar file in a
- * regular MarkdownView — which could never align properly because
- * two independent editors have different line heights and word wrap.
+ * Two modes:
+ *   Linked   — slots are absolutely positioned to align with source
+ *              anchors, scroll sync is active, clicking empty space
+ *              creates/edits the note for the corresponding source line
+ *   Unlinked — slots are stacked in a simple list (no positioning),
+ *              no scroll sync, just a compact list of notes
  */
 
 import {
@@ -18,6 +16,7 @@ import {
 	MarkdownRenderer,
 	Component,
 	TFile,
+	setIcon,
 } from "obsidian";
 import type MarginNotesPlugin from "./main";
 import {
@@ -50,8 +49,9 @@ export class MarginNotesView extends ItemView {
 	private scrollSync: ScrollSync;
 	private suppressSave = false;
 	private renderComponents: Map<string, Component> = new Map();
-	/** Track which slot is being edited. */
 	private activeSlotId: string | null = null;
+	private linked = true;
+	private linkBtn: HTMLElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: MarginNotesPlugin) {
 		super(leaf);
@@ -74,13 +74,52 @@ export class MarginNotesView extends ItemView {
 		root.empty();
 		root.addClass("mn-notes-view");
 
+		// ── Header ─────────────────────────────────────────────
+		const header = root.createDiv("mn-header");
+
+		const left = header.createDiv("mn-header-left");
+		left.createSpan({
+			text: "Margin Notes",
+			cls: "mn-header-title",
+		});
+
+		const right = header.createDiv("mn-header-right");
+
+		// Link toggle
+		this.linkBtn = right.createEl("button", {
+			cls: "mn-header-btn clickable-icon",
+			attr: { "aria-label": "Scroll sync (linked)" },
+		});
+		setIcon(this.linkBtn, "link");
+		this.linkBtn.addClass("is-linked");
+		this.linkBtn.addEventListener("click", () =>
+			this.toggleLinked()
+		);
+
+		// Add note button
+		const addBtn = right.createEl("button", {
+			cls: "mn-header-btn clickable-icon",
+			attr: { "aria-label": "Add note at cursor" },
+		});
+		setIcon(addBtn, "plus");
+		addBtn.addEventListener("click", () =>
+			this.plugin.addAnnotationFromPane()
+		);
+
+		// ── Scroll container ───────────────────────────────────
 		this.scrollEl = root.createDiv("mn-scroller");
 		this.slotsContainer = this.scrollEl.createDiv("mn-slots");
-		this.heightSpacer = this.scrollEl.createDiv("mn-height-spacer");
+		this.heightSpacer = this.scrollEl.createDiv(
+			"mn-height-spacer"
+		);
 
-		// Click on empty space → create a new note at that Y
+		// Click on empty space → create or edit at that Y
 		this.scrollEl.addEventListener("click", (e) => {
-			if (e.target === this.slotsContainer || e.target === this.scrollEl) {
+			if (
+				e.target === this.slotsContainer ||
+				e.target === this.scrollEl ||
+				e.target === this.heightSpacer
+			) {
 				this.onEmptyClick(e);
 			}
 		});
@@ -103,10 +142,10 @@ export class MarginNotesView extends ItemView {
 		return this.sourcePath;
 	}
 
-	/**
-	 * Load annotations for a source file and render slots.
-	 * Called when the split view opens or the source file changes.
-	 */
+	isLinked(): boolean {
+		return this.linked;
+	}
+
 	async loadForSource(
 		sourcePath: string,
 		sourceScrollEl: HTMLElement
@@ -123,19 +162,33 @@ export class MarginNotesView extends ItemView {
 				await this.app.vault.cachedRead(file)
 			);
 		} else {
-			this.sidecar = { source: sourcePath, annotations: [] };
+			this.sidecar = {
+				source: sourcePath,
+				annotations: [],
+			};
 		}
 
-		// Attach scroll sync
-		this.scrollSync.attach(sourceScrollEl, this.scrollEl);
-
-		// Initial render
+		if (this.linked) {
+			this.scrollSync.attach(sourceScrollEl, this.scrollEl);
+		}
 		this.renderSlots();
 	}
 
-	/** Re-measure source positions and reposition all slots. */
+	/** Called when the active source leaf changes. */
+	updateLinkState(isCorrectSource: boolean): void {
+		if (isCorrectSource && this.linked) {
+			const srcEl = this.getSourceScrollEl();
+			if (srcEl) {
+				this.scrollSync.attach(srcEl, this.scrollEl);
+			}
+			this.repositionSlots();
+		} else {
+			this.scrollSync.detach();
+		}
+	}
+
 	repositionSlots(): void {
-		if (!this.sidecar) return;
+		if (!this.sidecar || !this.linked) return;
 
 		const anchors = this.measureSourceAnchors();
 		const heights = this.measureSlotHeights();
@@ -146,17 +199,18 @@ export class MarginNotesView extends ItemView {
 			if (el) el.style.top = `${sl.top}px`;
 		}
 
-		// Match total scrollable height to source
-		const sourceScroller = this.getSourceScrollEl();
-		const sourceHeight = sourceScroller?.scrollHeight ?? 0;
-		const total = computeTotalHeight(layout, heights, sourceHeight);
+		const srcScroller = this.getSourceScrollEl();
+		const srcHeight = srcScroller?.scrollHeight ?? 0;
+		const total = computeTotalHeight(
+			layout,
+			heights,
+			srcHeight
+		);
 		this.heightSpacer.style.height = `${total}px`;
 	}
 
-	/** Called when the source file is modified. */
 	async onSourceModified(): Promise<void> {
 		if (!this.sourcePath) return;
-		// Re-read sidecar (anchors may have been added via command)
 		const sidecarPath = getSidecarPath(this.sourcePath);
 		const file =
 			this.app.vault.getAbstractFileByPath(sidecarPath);
@@ -168,10 +222,68 @@ export class MarginNotesView extends ItemView {
 		this.renderSlots();
 	}
 
+	focusSlot(anchorId: string): void {
+		setTimeout(() => {
+			if (this.linked) this.repositionSlots();
+			const slot = this.slots.get(anchorId);
+			if (slot) {
+				slot.scrollIntoView({
+					behavior: "smooth",
+					block: "center",
+				});
+				this.startEditing(anchorId);
+			}
+		}, 200);
+	}
+
+	isSuppressingReload(): boolean {
+		return this.suppressSave;
+	}
+
+	getAnnotations(): Annotation[] {
+		return this.sidecar?.annotations ?? [];
+	}
+
+	// ── Link toggle ────────────────────────────────────────────
+
+	private toggleLinked(): void {
+		this.linked = !this.linked;
+
+		if (this.linkBtn) {
+			if (this.linked) {
+				setIcon(this.linkBtn, "link");
+				this.linkBtn.addClass("is-linked");
+				this.linkBtn.removeClass("is-unlinked");
+				this.linkBtn.setAttribute(
+					"aria-label",
+					"Scroll sync (linked)"
+				);
+			} else {
+				setIcon(this.linkBtn, "unlink");
+				this.linkBtn.removeClass("is-linked");
+				this.linkBtn.addClass("is-unlinked");
+				this.linkBtn.setAttribute(
+					"aria-label",
+					"Scroll sync (unlinked)"
+				);
+			}
+		}
+
+		if (this.linked) {
+			const srcEl = this.getSourceScrollEl();
+			if (srcEl) {
+				this.scrollSync.attach(srcEl, this.scrollEl);
+			}
+		} else {
+			this.scrollSync.detach();
+		}
+
+		this.renderSlots();
+	}
+
 	// ── Rendering ──────────────────────────────────────────────
 
 	private renderSlots(): void {
-		// Clean up
 		for (const c of this.renderComponents.values()) c.unload();
 		this.renderComponents.clear();
 		this.slotsContainer.empty();
@@ -179,17 +291,35 @@ export class MarginNotesView extends ItemView {
 
 		if (!this.sidecar) return;
 
-		// Create a slot element for each annotation
+		if (this.linked) {
+			this.slotsContainer.addClass("mn-slots-linked");
+			this.slotsContainer.removeClass("mn-slots-list");
+			this.heightSpacer.style.display = "";
+		} else {
+			this.slotsContainer.removeClass("mn-slots-linked");
+			this.slotsContainer.addClass("mn-slots-list");
+			this.heightSpacer.style.display = "none";
+		}
+
+		if (this.sidecar.annotations.length === 0) {
+			this.slotsContainer.createDiv({
+				cls: "mn-empty",
+				text: "No notes yet. Click + or right-click in the source to add one.",
+			});
+			return;
+		}
+
 		for (const ann of this.sidecar.annotations) {
 			this.createSlotElement(ann);
 		}
 
-		// Position after DOM settles
-		requestAnimationFrame(() => {
+		if (this.linked) {
 			requestAnimationFrame(() => {
-				this.repositionSlots();
+				requestAnimationFrame(() => {
+					this.repositionSlots();
+				});
 			});
-		});
+		}
 	}
 
 	private createSlotElement(ann: Annotation): void {
@@ -199,7 +329,18 @@ export class MarginNotesView extends ItemView {
 		});
 		this.slots.set(ann.anchorId, slot);
 
-		// Rendered content (visible when not editing)
+		// Delete button
+		const del = slot.createDiv({
+			cls: "mn-slot-delete",
+			attr: { "aria-label": "Delete note" },
+		});
+		del.textContent = "\u00d7";
+		del.addEventListener("click", (e) => {
+			e.stopPropagation();
+			this.deleteAnnotation(ann.anchorId);
+		});
+
+		// Rendered content
 		const display = slot.createDiv("mn-slot-display");
 		if (ann.content.trim()) {
 			const comp = new Component();
@@ -219,24 +360,13 @@ export class MarginNotesView extends ItemView {
 			});
 		}
 
-		// Delete button
-		const del = slot.createDiv({
-			cls: "mn-slot-delete",
-			attr: { "aria-label": "Delete note" },
-		});
-		del.textContent = "×";
-		del.addEventListener("click", (e) => {
-			e.stopPropagation();
-			this.deleteAnnotation(ann.anchorId);
-		});
-
 		// Click to edit
 		display.addEventListener("click", (e) => {
 			e.stopPropagation();
 			this.startEditing(ann.anchorId);
 		});
 
-		// Hover highlighting on source
+		// Hover highlighting
 		slot.addEventListener("mouseenter", () =>
 			this.plugin.highlightSource(ann.anchorId)
 		);
@@ -271,11 +401,10 @@ export class MarginNotesView extends ItemView {
 		textarea.placeholder = "Type your note...";
 		textarea.focus();
 
-		// Auto-resize textarea to fit content
 		const autoResize = () => {
 			textarea.style.height = "auto";
 			textarea.style.height = `${textarea.scrollHeight}px`;
-			this.repositionSlots();
+			if (this.linked) this.repositionSlots();
 		};
 		autoResize();
 
@@ -289,9 +418,7 @@ export class MarginNotesView extends ItemView {
 		});
 
 		textarea.addEventListener("keydown", (e) => {
-			if (e.key === "Escape") {
-				textarea.blur();
-			}
+			if (e.key === "Escape") textarea.blur();
 		});
 	}
 
@@ -299,7 +426,6 @@ export class MarginNotesView extends ItemView {
 		const slot = this.slots.get(anchorId);
 		if (!slot) return;
 
-		// Save immediately
 		const textarea = slot.querySelector(
 			".mn-slot-editor"
 		) as HTMLTextAreaElement | null;
@@ -317,14 +443,12 @@ export class MarginNotesView extends ItemView {
 		) as HTMLElement;
 		if (display) display.style.display = "";
 
-		if (this.activeSlotId === anchorId) {
+		if (this.activeSlotId === anchorId)
 			this.activeSlotId = null;
-		}
 
-		// Re-render the display content and save
 		this.flushSave(anchorId);
 		this.rerenderSlotDisplay(anchorId);
-		this.repositionSlots();
+		if (this.linked) this.repositionSlots();
 	}
 
 	private rerenderSlotDisplay(anchorId: string): void {
@@ -339,7 +463,6 @@ export class MarginNotesView extends ItemView {
 		) as HTMLElement;
 		if (!display) return;
 
-		// Clean up old render component
 		const oldComp = this.renderComponents.get(anchorId);
 		if (oldComp) {
 			oldComp.unload();
@@ -368,7 +491,10 @@ export class MarginNotesView extends ItemView {
 
 	// ── Save ───────────────────────────────────────────────────
 
-	private scheduleSave(anchorId: string, content: string): void {
+	private scheduleSave(
+		anchorId: string,
+		content: string
+	): void {
 		const existing = this.saveTimers.get(anchorId);
 		if (existing) window.clearTimeout(existing);
 
@@ -397,9 +523,8 @@ export class MarginNotesView extends ItemView {
 	}
 
 	private flushAllSaves(): void {
-		for (const [id, timer] of this.saveTimers) {
+		for (const [, timer] of this.saveTimers)
 			window.clearTimeout(timer);
-		}
 		this.saveTimers.clear();
 		if (this.sidecar) this.persistSidecar();
 	}
@@ -408,7 +533,6 @@ export class MarginNotesView extends ItemView {
 		if (!this.sidecar || !this.sourcePath) return;
 		this.suppressSave = true;
 
-		// Sort annotations by source order before saving
 		const srcFile = this.app.vault.getAbstractFileByPath(
 			this.sourcePath
 		);
@@ -420,44 +544,67 @@ export class MarginNotesView extends ItemView {
 
 		const path = getSidecarPath(this.sourcePath);
 		const content = serializeSidecar(this.sidecar);
-		const existing = this.app.vault.getAbstractFileByPath(path);
+		const existing =
+			this.app.vault.getAbstractFileByPath(path);
 
-		if (existing instanceof TFile) {
+		if (existing instanceof TFile)
 			await this.app.vault.modify(existing, content);
-		} else {
-			await this.app.vault.create(path, content);
-		}
+		else await this.app.vault.create(path, content);
 
 		setTimeout(() => {
 			this.suppressSave = false;
 		}, 300);
 	}
 
-	isSuppressingReload(): boolean {
-		return this.suppressSave;
-	}
-
-	// ── Click to create ────────────────────────────────────────
+	// ── Click to create/edit ───────────────────────────────────
 
 	private onEmptyClick(e: MouseEvent): void {
-		if (!this.sourcePath) return;
+		if (!this.sourcePath || !this.linked) return;
 
-		// Map click Y to the nearest source line
-		const clickY = e.offsetY + this.scrollEl.scrollTop;
+		const clickY =
+			e.clientY -
+			this.scrollEl.getBoundingClientRect().top +
+			this.scrollEl.scrollTop;
+
+		// Check if click is near an existing slot — if so, edit it
+		const nearest = this.findNearestSlotAtY(clickY);
+		if (nearest) {
+			this.startEditing(nearest);
+			return;
+		}
+
+		// Otherwise create a new note at the corresponding source line
 		this.plugin.createAnnotationAtY(clickY);
+	}
+
+	/**
+	 * If an existing slot is within 30px of click Y, return its ID.
+	 * This makes it easy to click near an existing note to edit it.
+	 */
+	private findNearestSlotAtY(
+		y: number
+	): string | null {
+		for (const [id, el] of this.slots) {
+			const top = parseFloat(el.style.top) || 0;
+			const bottom = top + el.offsetHeight;
+			if (y >= top - 30 && y <= bottom + 30) return id;
+		}
+		return null;
 	}
 
 	// ── Deletion ───────────────────────────────────────────────
 
-	private async deleteAnnotation(anchorId: string): Promise<void> {
+	private async deleteAnnotation(
+		anchorId: string
+	): Promise<void> {
 		if (!this.sidecar || !this.sourcePath) return;
 
-		this.sidecar.annotations = this.sidecar.annotations.filter(
-			(a) => a.anchorId !== anchorId
-		);
+		this.sidecar.annotations =
+			this.sidecar.annotations.filter(
+				(a) => a.anchorId !== anchorId
+			);
 		await this.persistSidecar();
 
-		// Remove anchor from source
 		const { removeAnchor } = await import("./anchor");
 		const srcFile = this.app.vault.getAbstractFileByPath(
 			this.sourcePath
@@ -475,12 +622,12 @@ export class MarginNotesView extends ItemView {
 	// ── Measurement ────────────────────────────────────────────
 
 	private measureSourceAnchors(): AnchorMeasurement[] {
-		const sourceScroller = this.getSourceScrollEl();
-		if (!sourceScroller) return [];
+		const srcScroller = this.getSourceScrollEl();
+		if (!srcScroller) return [];
 
 		const anchors: AnchorMeasurement[] = [];
 		const els =
-			sourceScroller.querySelectorAll<HTMLElement>(
+			srcScroller.querySelectorAll<HTMLElement>(
 				"[data-ann-id]"
 			);
 
@@ -488,11 +635,13 @@ export class MarginNotesView extends ItemView {
 			const id = el.dataset.annId;
 			if (!id) continue;
 			const elRect = el.getBoundingClientRect();
-			const cRect = sourceScroller.getBoundingClientRect();
+			const cRect = srcScroller.getBoundingClientRect();
 			anchors.push({
 				anchorId: id,
 				sourceY:
-					elRect.top - cRect.top + sourceScroller.scrollTop,
+					elRect.top -
+					cRect.top +
+					srcScroller.scrollTop,
 			});
 		}
 
@@ -501,9 +650,8 @@ export class MarginNotesView extends ItemView {
 
 	private measureSlotHeights(): Map<string, number> {
 		const heights = new Map<string, number>();
-		for (const [id, el] of this.slots) {
+		for (const [id, el] of this.slots)
 			heights.set(id, el.offsetHeight);
-		}
 		return heights;
 	}
 
@@ -511,8 +659,7 @@ export class MarginNotesView extends ItemView {
 		if (!this.plugin.splitSourceLeaf) return null;
 		const view = this.plugin.splitSourceLeaf.view;
 		if (!(view instanceof MarkdownView)) return null;
-		const mode = view.getMode();
-		if (mode === "preview")
+		if (view.getMode() === "preview")
 			return view.containerEl.querySelector(
 				".markdown-preview-view"
 			) as HTMLElement | null;
@@ -521,43 +668,18 @@ export class MarginNotesView extends ItemView {
 		) as HTMLElement | null;
 	}
 
-	/**
-	 * Map a Y coordinate (in notes scroll space) to the nearest
-	 * source line number that doesn't already have an annotation.
-	 */
 	findSourceLineAtY(y: number): number | null {
-		const sourceScroller = this.getSourceScrollEl();
-		if (!sourceScroller) return null;
-
 		const view = this.plugin.splitSourceLeaf?.view;
 		if (!(view instanceof MarkdownView)) return null;
 
-		// Use CM6 to find the line at this Y
 		// @ts-ignore — accessing internal CM6 editor
 		const cmView = (view.editor as any).cm;
 		if (!cmView) return null;
 
 		const block = cmView.lineBlockAtHeight(y);
 		const line = cmView.state.doc.lineAt(block.from);
-
-		// Check this line doesn't already have an anchor
 		if (ANCHOR_RE.test(line.text)) return null;
 
 		return line.number;
-	}
-
-	/** Focus a specific annotation slot for editing. */
-	focusSlot(anchorId: string): void {
-		setTimeout(() => {
-			this.repositionSlots();
-			const slot = this.slots.get(anchorId);
-			if (slot) {
-				slot.scrollIntoView({
-					behavior: "smooth",
-					block: "center",
-				});
-				this.startEditing(anchorId);
-			}
-		}, 200);
 	}
 }
