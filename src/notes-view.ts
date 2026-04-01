@@ -16,6 +16,7 @@ import {
 	MarkdownRenderer,
 	Component,
 	TFile,
+	Notice,
 	setIcon,
 } from "obsidian";
 import type MarginNotesPlugin from "./main";
@@ -181,10 +182,27 @@ export class MarginNotesView extends ItemView {
 			if (srcEl) {
 				this.scrollSync.attach(srcEl, this.scrollEl);
 			}
-			this.repositionSlots();
+			this.renderSlots(); // re-render as linked
 		} else {
 			this.scrollSync.detach();
+			// Show as unlinked list when wrong source is active
+			if (!isCorrectSource && this.linked) {
+				this.slotsContainer.removeClass("mn-slots-linked");
+				this.slotsContainer.addClass("mn-slots-list");
+				this.heightSpacer.style.display = "none";
+				for (const [, el] of this.slots) {
+					el.style.top = "";
+				}
+			}
 		}
+	}
+
+	/** Check if the correct source tab is currently active. */
+	private isSourceActive(): boolean {
+		if (!this.plugin.splitSourceLeaf) return false;
+		const active =
+			this.app.workspace.getActiveViewOfType(MarkdownView);
+		return active?.leaf === this.plugin.splitSourceLeaf;
 	}
 
 	repositionSlots(): void {
@@ -247,6 +265,13 @@ export class MarginNotesView extends ItemView {
 	// ── Link toggle ────────────────────────────────────────────
 
 	private toggleLinked(): void {
+		if (!this.linked && !this.isSourceActive()) {
+			new Notice(
+				"Switch to the source document tab to link"
+			);
+			return;
+		}
+
 		this.linked = !this.linked;
 
 		if (this.linkBtn) {

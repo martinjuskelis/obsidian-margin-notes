@@ -386,10 +386,19 @@ export default class MarginNotesPlugin extends Plugin {
 		return null;
 	}
 
-	/** Called from the mobile card pane's "+" button. */
+	/** Called from the "+" button in either the notes view or card pane. */
 	async addAnnotationFromPane(): Promise<void> {
+		// Find the source path from whichever view is active
+		const nv = this.getNotesView();
 		const pane = this.getAnnotationPane();
-		const targetPath = pane?.getCurrentSourcePath();
+		const targetPath =
+			nv?.getSourcePath() ??
+			pane?.getCurrentSourcePath() ??
+			// Fall back to the split source leaf's file
+			(this.splitSourceLeaf?.view instanceof MarkdownView
+				? this.splitSourceLeaf.view.file?.path
+				: null);
+
 		if (!targetPath) {
 			new Notice("Open a document first");
 			return;
@@ -401,16 +410,15 @@ export default class MarginNotesPlugin extends Plugin {
 			const v = l.view as MarkdownView;
 			if (v.file?.path === targetPath) {
 				await this.addAnnotation(v);
-				// Refresh the card pane after adding
+				// Refresh whichever view is showing
+				if (nv) await nv.onSourceModified();
 				if (pane) {
 					await pane.loadForFile(targetPath);
-					// Focus the last annotation (the new one)
 					const anns = pane.getAnnotations();
-					if (anns.length > 0) {
+					if (anns.length > 0)
 						pane.focusAnnotation(
 							anns[anns.length - 1].anchorId
 						);
-					}
 				}
 				return;
 			}
