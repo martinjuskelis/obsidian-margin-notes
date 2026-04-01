@@ -44,6 +44,9 @@ export async function exportToHtml(
 			annotationMap.set(ann.anchorId, ann.content);
 	}
 
+	// Split source into groups. Each annotated line becomes its own
+	// group so the sidenote aligns with THAT line, not a chunk of
+	// preceding unannotated content.
 	const lines = sourceText.split("\n");
 	const groups: {
 		src: string;
@@ -54,18 +57,25 @@ export async function exportToHtml(
 
 	for (let i = 0; i < lines.length; i++) {
 		const a = anchors.find((x) => x.line === i);
-		cur.push(lines[i]);
 		if (a) {
+			// Flush any accumulated unannotated lines first
+			if (cur.length > 0) {
+				const t = stripAnchors(cur.join("\n")).trim();
+				if (t) groups.push({ src: t, ann: null, id: null });
+				cur = [];
+			}
+			// The annotated line is its own group
 			groups.push({
-				src: stripAnchors(cur.join("\n")).trim(),
+				src: stripAnchors(lines[i]).trim(),
 				ann: annotationMap.get(a.id) || null,
 				id: a.id,
 			});
-			cur = [];
+		} else {
+			cur.push(lines[i]);
 		}
 	}
 	if (cur.length > 0) {
-		const t = cur.join("\n").trim();
+		const t = stripAnchors(cur.join("\n")).trim();
 		if (t) groups.push({ src: t, ann: null, id: null });
 	}
 
