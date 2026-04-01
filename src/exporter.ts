@@ -3,7 +3,7 @@
  *
  * Layouts:
  *   side-by-side — CSS Grid two-column (source left, notes right)
- *   tufte        — Tufte-style sidenotes in the right margin
+ *   tufte        — Faithful Tufte-style sidenotes (from tufte-css)
  *   inline       — Annotations rendered below each paragraph
  *   footnotes    — Annotations collected at the end as endnotes
  *
@@ -44,7 +44,6 @@ export async function exportToHtml(
 			annotationMap.set(ann.anchorId, ann.content);
 	}
 
-	// Split source into groups at anchor boundaries
 	const lines = sourceText.split("\n");
 	const groups: {
 		src: string;
@@ -70,7 +69,6 @@ export async function exportToHtml(
 		if (t) groups.push({ src: t, ann: null, id: null });
 	}
 
-	// Render markdown to HTML
 	const comp = new Component();
 	comp.load();
 	const rendered: RenderedGroup[] = [];
@@ -104,37 +102,41 @@ export async function exportToHtml(
 	}
 	comp.unload();
 
-	return buildPage(sourceFile.basename, rendered, settings);
+	return settings.exportLayout === "tufte"
+		? buildTuftePage(sourceFile.basename, rendered, settings)
+		: buildStandardPage(
+				sourceFile.basename,
+				rendered,
+				settings
+			);
 }
 
-// ── Page builder ───────────────────────────────────────────────
+// ── Standard page (side-by-side, inline, footnotes) ────────────
 
-function buildPage(
+function buildStandardPage(
 	title: string,
 	groups: RenderedGroup[],
 	s: MarginNotesSettings
 ): string {
 	const body =
-		s.exportLayout === "tufte"
-			? buildTufte(groups, s)
-			: s.exportLayout === "inline"
-				? buildInline(groups, s)
-				: s.exportLayout === "footnotes"
-					? buildFootnotes(groups, s)
-					: buildSideBySide(groups, s);
+		s.exportLayout === "inline"
+			? buildInline(groups, s)
+			: s.exportLayout === "footnotes"
+				? buildFootnotes(groups, s)
+				: buildSideBySide(groups, s);
 
 	const titleHtml = s.exportShowTitle
 		? `<h1 class="page-title">${esc(title)}</h1>`
 		: "";
 
 	return `<!DOCTYPE html>
-<html lang="en" data-theme="${s.exportTheme}" data-layout="${s.exportLayout}">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${esc(title)}</title>
 <style>
-${buildCSS(s)}
+${standardCSS(s)}
 </style>
 </head>
 <body>
@@ -149,7 +151,74 @@ ${JS}
 </html>`;
 }
 
-// ── Layout builders ────────────────────────────────────────────
+// ── Tufte page (separate because body styling is different) ─────
+
+function buildTuftePage(
+	title: string,
+	groups: RenderedGroup[],
+	s: MarginNotesSettings
+): string {
+	const titleHtml = s.exportShowTitle
+		? `<h1>${esc(title)}</h1>`
+		: "";
+
+	let n = 0;
+	let body = "";
+
+	for (const g of groups) {
+		let srcHtml = g.sourceHtml;
+
+		if (g.annotationHtml) {
+			n++;
+			const label = `sn-${n}`;
+
+			// Build the sidenote inline elements
+			const numLabel = s.exportShowNumbers
+				? `<label for="${label}" class="margin-toggle sidenote-number"></label>`
+				: `<label for="${label}" class="margin-toggle">&#8853;</label>`;
+			const toggle = `<input type="checkbox" id="${label}" class="margin-toggle"/>`;
+			const note = `<span class="${s.exportShowNumbers ? "sidenote" : "marginnote"}">${g.annotationHtml}</span>`;
+			const injection = numLabel + toggle + note;
+
+			// Inject sidenote INSIDE the last <p> tag of the source HTML
+			// This is how tufte-css works — notes are inline in paragraphs
+			const lastP = srcHtml.lastIndexOf("</p>");
+			if (lastP >= 0) {
+				srcHtml =
+					srcHtml.substring(0, lastP) +
+					injection +
+					srcHtml.substring(lastP);
+			} else {
+				// No <p> — wrap everything
+				srcHtml = `<p>${srcHtml}${injection}</p>`;
+			}
+		}
+
+		body += srcHtml + "\n";
+	}
+
+	return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${esc(title)}</title>
+<style>
+${tufteCSS(s)}
+</style>
+</head>
+<body>
+<article>
+${titleHtml}
+<section>
+${body}
+</section>
+</article>
+</body>
+</html>`;
+}
+
+// ── Layout builders (non-Tufte) ────────────────────────────────
 
 function buildSideBySide(
 	groups: RenderedGroup[],
@@ -169,29 +238,6 @@ function buildSideBySide(
 			out += `<div class="annotation"${num}>${g.annotationHtml}</div>`;
 		}
 		out += `</div>\n</section>\n`;
-	}
-	out += "</article>";
-	return out;
-}
-
-function buildTufte(
-	groups: RenderedGroup[],
-	s: MarginNotesSettings
-): string {
-	let n = 0;
-	let out = '<article class="tufte-body">\n';
-	for (const g of groups) {
-		if (g.annotationHtml) {
-			n++;
-			const label = `sn-${n}`;
-			const numHtml = s.exportShowNumbers
-				? `<label for="${label}" class="margin-toggle sidenote-number"></label>`
-				: "";
-			const toggle = `<input type="checkbox" id="${label}" class="margin-toggle"/>`;
-			out += `<div class="tufte-para">${g.sourceHtml}${numHtml}${toggle}<span class="sidenote">${g.annotationHtml}</span></div>\n`;
-		} else {
-			out += `<div class="tufte-para">${g.sourceHtml}</div>\n`;
-		}
 	}
 	out += "</article>";
 	return out;
@@ -241,17 +287,272 @@ function buildFootnotes(
 
 	if (notes.length > 0) {
 		out += '<section class="footnotes">\n<h2>Notes</h2>\n<ol>\n';
-		for (const note of notes) {
+		for (const note of notes)
 			out += `<li id="fn-${note.num}">${note.html}</li>\n`;
-		}
 		out += "</ol>\n</section>";
 	}
 	return out;
 }
 
-// ── CSS ────────────────────────────────────────────────────────
+// ── Tufte CSS (faithful to tufte-css by Edward Tufte) ──────────
 
-function buildCSS(s: MarginNotesSettings): string {
+function tufteCSS(s: MarginNotesSettings): string {
+	const darkMode =
+		s.exportTheme === "dark"
+			? `body{background-color:#151515;color:#ddd}`
+			: "";
+
+	const bgColor =
+		s.exportTheme === "sepia"
+			? "#f8f1e3"
+			: s.exportTheme === "dark"
+				? "#151515"
+				: "#fffff8";
+	const fgColor =
+		s.exportTheme === "dark" ? "#ddd" : "#111";
+
+	return `
+@charset "UTF-8";
+
+html { font-size: 15px; }
+
+body {
+  width: 87.5%;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: 12.5%;
+  font-family: Palatino, "Palatino Linotype", "Palatino LT STD",
+    "Book Antiqua", Georgia, serif;
+  background-color: ${bgColor};
+  color: ${fgColor};
+  max-width: 1400px;
+  counter-reset: sidenote-counter;
+}
+
+h1 {
+  font-weight: 400;
+  margin-top: 4rem;
+  margin-bottom: 1.5rem;
+  font-size: 3.2rem;
+  line-height: 1;
+}
+
+h2 {
+  font-style: italic;
+  font-weight: 400;
+  margin-top: 2.1rem;
+  margin-bottom: 1.4rem;
+  font-size: 2.2rem;
+  line-height: 1;
+}
+
+h3 {
+  font-style: italic;
+  font-weight: 400;
+  font-size: 1.7rem;
+  margin-top: 2rem;
+  margin-bottom: 1.4rem;
+  line-height: 1;
+}
+
+hr {
+  display: block;
+  height: 1px;
+  width: 55%;
+  border: 0;
+  border-top: 1px solid #ccc;
+  margin: 1em 0;
+  padding: 0;
+}
+
+article { padding: 5rem 0; }
+section { padding-top: 1rem; padding-bottom: 1rem; }
+
+p, dl, ol, ul {
+  font-size: 1.4rem;
+  line-height: 2rem;
+}
+
+p {
+  margin-top: 1.4rem;
+  margin-bottom: 1.4rem;
+  padding-right: 0;
+  vertical-align: baseline;
+}
+
+blockquote { font-size: 1.4rem; }
+blockquote p { width: 55%; margin-right: 40px; }
+blockquote footer { width: 55%; font-size: 1.1rem; text-align: right; }
+
+section > p,
+section > footer,
+section > table {
+  width: 55%;
+}
+
+section > dl,
+section > ol,
+section > ul {
+  width: 50%;
+  -webkit-padding-start: 5%;
+}
+
+figure {
+  padding: 0; border: 0; font-size: 100%; font: inherit;
+  vertical-align: baseline; max-width: 55%;
+  -webkit-margin-start: 0; -webkit-margin-end: 0;
+  margin: 0 0 3em 0;
+}
+
+a:link, a:visited {
+  color: inherit;
+  text-underline-offset: 0.1em;
+  text-decoration-thickness: 0.05em;
+}
+
+img { max-width: 100%; }
+
+/* ── Sidenotes ──────────────────────────────────────────── */
+
+.sidenote, .marginnote {
+  float: right;
+  clear: right;
+  margin-right: -60%;
+  width: 50%;
+  margin-top: 0.3rem;
+  margin-bottom: 0;
+  font-size: 1.1rem;
+  line-height: 1.3;
+  vertical-align: baseline;
+  position: relative;
+}
+
+.sidenote-number {
+  counter-increment: sidenote-counter;
+}
+
+.sidenote-number:after,
+.sidenote:before {
+  position: relative;
+  vertical-align: baseline;
+}
+
+.sidenote-number:after {
+  content: counter(sidenote-counter);
+  font-size: 1rem;
+  top: -0.5rem;
+  left: 0.1rem;
+}
+
+.sidenote:before {
+  content: counter(sidenote-counter) " ";
+  font-size: 1rem;
+  top: -0.5rem;
+}
+
+blockquote .sidenote,
+blockquote .marginnote {
+  margin-right: -82%;
+  min-width: 59%;
+  text-align: left;
+}
+
+input.margin-toggle { display: none; }
+
+label.sidenote-number {
+  display: inline-block;
+  max-height: 2rem;
+}
+
+label.margin-toggle:not(.sidenote-number) {
+  display: none;
+}
+
+/* Remove paragraph margins inside sidenotes */
+.sidenote p, .marginnote p {
+  font-size: 1.1rem;
+  line-height: 1.3;
+  margin-top: 0.3rem;
+  margin-bottom: 0.3rem;
+}
+.sidenote p:first-child, .marginnote p:first-child { margin-top: 0; }
+.sidenote p:last-child, .marginnote p:last-child { margin-bottom: 0; }
+
+/* Code */
+code, pre > code {
+  font-family: Consolas, "Liberation Mono", Menlo, Courier, monospace;
+  font-size: 1.0rem;
+  line-height: 1.42;
+}
+
+pre > code {
+  font-size: 0.9rem;
+  width: 52.5%;
+  margin-left: 2.5%;
+  overflow-x: auto;
+  display: block;
+}
+
+table { border-collapse: collapse; margin: 1rem 0; }
+th, td { border: 1px solid #ccc; padding: .5rem; text-align: left; }
+th { background: rgba(0,0,0,.03); }
+
+span.newthought {
+  font-variant: small-caps;
+  font-size: 1.2em;
+}
+
+/* ── Responsive ─────────────────────────────────────────── */
+
+@media (max-width: 760px) {
+  body {
+    width: 84%;
+    padding-left: 8%;
+    padding-right: 8%;
+  }
+
+  hr,
+  section > p,
+  section > footer,
+  section > table { width: 100%; }
+
+  pre > code { width: 97%; }
+
+  section > dl,
+  section > ol,
+  section > ul { width: 90%; }
+
+  figure { max-width: 90%; }
+
+  blockquote { margin-left: 1.5em; margin-right: 0; }
+  blockquote p, blockquote footer { width: 100%; }
+
+  label.margin-toggle:not(.sidenote-number) { display: inline; }
+
+  .sidenote, .marginnote { display: none; }
+
+  .margin-toggle:checked + .sidenote,
+  .margin-toggle:checked + .marginnote {
+    display: block;
+    float: left;
+    left: 1rem;
+    clear: both;
+    width: 95%;
+    margin: 1rem 2.5%;
+    vertical-align: baseline;
+    position: relative;
+  }
+
+  label { cursor: pointer; }
+
+  img { width: 100%; }
+}
+`;
+}
+
+// ── Standard CSS (non-Tufte layouts) ───────────────────────────
+
+function standardCSS(s: MarginNotesSettings): string {
 	const font =
 		s.exportFont === "serif"
 			? "'Georgia','Times New Roman',serif"
@@ -267,10 +568,7 @@ function buildCSS(s: MarginNotesSettings): string {
 				: "3fr 2fr";
 
 	return `
-/* ── Reset ──────────────────────────────────────────────── */
 *{margin:0;padding:0;box-sizing:border-box}
-
-/* ── Theme: colors ──────────────────────────────────────── */
 ${themeColors(s.exportTheme)}
 
 body{
@@ -280,13 +578,11 @@ body{
   background:var(--bg);
 }
 
-/* ── Page title ─────────────────────────────────────────── */
 .page-title{
   max-width:900px;margin:2.5rem auto 1.5rem;padding:0 1.5rem;
   font-size:2rem;color:var(--fg);
 }
 
-/* ── Common ─────────────────────────────────────────────── */
 .content{max-width:1400px;margin:0 auto;padding:0 1rem}
 h1,h2,h3,h4,h5,h6{margin:1.2rem 0 .6rem;color:var(--fg)}
 p{margin:.6rem 0}
@@ -301,21 +597,17 @@ img{max-width:100%}
 blockquote{border-left:3px solid var(--border);padding-left:1rem;color:var(--muted);margin:1rem 0}
 a{color:var(--accent)}
 
-/* ── Annotation card (shared) ───────────────────────────── */
-.annotation,.inline-ann,.sidenote{
+.annotation,.inline-ann{
   background:var(--ann-bg);
   border-left:3px solid var(--ann-border);
   padding:.75rem 1rem;
   border-radius:0 4px 4px 0;
   position:relative;
-  font-size:.92em;
-  line-height:1.55;
-  color:var(--fg);
+  font-size:.92em;line-height:1.55;color:var(--fg);
 }
-.annotation p:last-child,.inline-ann p:last-child,.sidenote p:last-child{margin-bottom:0}
-.annotation p:first-child,.inline-ann p:first-child,.sidenote p:first-child{margin-top:0}
+.annotation p:last-child,.inline-ann p:last-child{margin-bottom:0}
+.annotation p:first-child,.inline-ann p:first-child{margin-top:0}
 
-/* ── Numbered badges ────────────────────────────────────── */
 ${s.exportShowNumbers ? `
 .annotation[data-num]::before,.inline-ann[data-num]::before{
   content:attr(data-num);
@@ -325,14 +617,10 @@ ${s.exportShowNumbers ? `
   display:flex;align-items:center;justify-content:center;font-weight:600;
 }` : ""}
 
-/* ── Click interaction ──────────────────────────────────── */
 .annotation.selected,.inline-ann.selected{
   background:var(--ann-selected);border-color:var(--accent);
 }
 
-/* ════════════════════════════════════════════════════════════
-   LAYOUT: Side by side
-   ════════════════════════════════════════════════════════════ */
 ${s.exportLayout === "side-by-side" ? `
 @media screen and (min-width:46rem){
   .article{display:grid;grid-template-columns:${ratio}}
@@ -345,56 +633,12 @@ ${s.exportLayout === "side-by-side" ? `
 .annotation{margin:.5rem 0;cursor:pointer}
 ` : ""}
 
-/* ════════════════════════════════════════════════════════════
-   LAYOUT: Tufte sidenotes
-   ════════════════════════════════════════════════════════════ */
-${s.exportLayout === "tufte" ? `
-.tufte-body{
-  max-width:55%;margin:0 auto;padding:0 1rem;
-  counter-reset:sidenote-counter;
-}
-.tufte-para{position:relative;padding:.4rem 0}
-.sidenote-number{counter-increment:sidenote-counter}
-.sidenote-number::after{
-  content:counter(sidenote-counter);
-  font-size:.6em;top:-.5rem;position:relative;vertical-align:baseline;
-}
-.sidenote::before{
-  content:counter(sidenote-counter)" ";
-  font-size:.6em;position:relative;top:-.5rem;
-}
-.sidenote{
-  float:right;clear:right;margin-right:-60%;width:50%;
-  margin-top:.3rem;margin-bottom:1rem;
-  font-size:.9em;line-height:1.4;
-  border-left:2px solid var(--ann-border);
-  background:transparent;padding:.3rem .5rem .3rem .75rem;
-  border-radius:0;
-}
-.margin-toggle{display:none}
-@media(max-width:46rem){
-  .tufte-body{max-width:100%}
-  .sidenote{display:none}
-  .margin-toggle:checked+.sidenote{
-    display:block;float:left;clear:both;width:95%;
-    margin:1rem 2.5%;
-  }
-  label.margin-toggle{cursor:pointer;color:var(--accent)}
-}
-` : ""}
-
-/* ════════════════════════════════════════════════════════════
-   LAYOUT: Inline
-   ════════════════════════════════════════════════════════════ */
 ${s.exportLayout === "inline" ? `
 .inline-body{max-width:750px;margin:0 auto;padding:0 1.5rem}
 .inline-source{padding:.4rem 0}
 .inline-ann{margin:.5rem 0 1.5rem;cursor:pointer}
 ` : ""}
 
-/* ════════════════════════════════════════════════════════════
-   LAYOUT: Footnotes
-   ════════════════════════════════════════════════════════════ */
 ${s.exportLayout === "footnotes" ? `
 .fn-body{max-width:750px;margin:0 auto;padding:0 1.5rem}
 .fn-source{padding:.4rem 0}
@@ -411,29 +655,25 @@ ${s.exportLayout === "footnotes" ? `
 function themeColors(theme: string): string {
 	switch (theme) {
 		case "dark":
-			return `
-:root{
+			return `:root{
   --fg:#e0e0e0;--bg:#1a1a2e;--surface:#252540;--border:#3a3a55;
   --muted:#888;--accent:#7c9dff;
   --ann-bg:rgba(124,157,255,.08);--ann-border:#5a7abf;--ann-selected:rgba(124,157,255,.18);
 }`;
 		case "sepia":
-			return `
-:root{
+			return `:root{
   --fg:#433422;--bg:#f8f1e3;--surface:#f0e8d8;--border:#d4c5a9;
   --muted:#8a7560;--accent:#b07030;
   --ann-bg:rgba(176,112,48,.06);--ann-border:#c49a56;--ann-selected:rgba(176,112,48,.14);
 }`;
 		case "academic":
-			return `
-:root{
+			return `:root{
   --fg:#222;--bg:#fffff8;--surface:#f8f8f2;--border:#ccc;
   --muted:#666;--accent:#8b0000;
   --ann-bg:rgba(139,0,0,.04);--ann-border:#8b0000;--ann-selected:rgba(139,0,0,.12);
 }`;
-		default: // light
-			return `
-:root{
+		default:
+			return `:root{
   --fg:#1a1a1a;--bg:#fff;--surface:#f8f8f6;--border:#e5e7eb;
   --muted:#6b7280;--accent:#4a6fa5;
   --ann-bg:#f5f5f0;--ann-border:#6b7280;--ann-selected:#fef9c3;
@@ -441,10 +681,7 @@ function themeColors(theme: string): string {
 	}
 }
 
-// ── JS ─────────────────────────────────────────────────────────
-
 const JS = `
-document.documentElement.classList.replace('no-js','js');
 document.querySelectorAll('.annotation,.inline-ann').forEach(function(a){
   a.addEventListener('click',function(e){
     var was=a.classList.contains('selected');
