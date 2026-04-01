@@ -109,6 +109,52 @@
 	box-shadow: 0 0 0 1px var(--interactive-accent);
 }
 
+/* Orphaned (unlinked) notes */
+.mn-slot-orphaned {
+	border-left-color: var(--text-faint);
+	opacity: 0.8;
+}
+.mn-slot-orphaned:hover {
+	opacity: 1;
+}
+
+/* Orphaned notes always in list mode (not positioned) */
+.mn-slots-linked .mn-slot-orphaned {
+	position: relative !important;
+	top: auto !important;
+	left: auto;
+	right: auto;
+	margin-bottom: 8px;
+}
+
+.mn-orphaned-divider {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	padding: 16px 8px 8px;
+	margin-top: 16px;
+	border-top: 1px solid var(--background-modifier-border);
+}
+/* In linked mode, push the divider below all positioned slots */
+.mn-slots-linked .mn-orphaned-divider {
+	position: relative;
+	margin-top: 0;
+	padding-top: 24px;
+}
+
+.mn-orphaned-label {
+	font-weight: 600;
+	font-size: 0.8em;
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+.mn-orphaned-hint {
+	font-size: 0.75em;
+	color: var(--text-faint);
+	margin-top: 2px;
+}
+
 /* Delete button */
 .mn-slot-delete {
 	position: absolute;

@@ -209,22 +209,43 @@ export class MarginNotesView extends ItemView {
 		if (!this.sidecar || !this.linked) return;
 
 		const anchors = this.measureSourceAnchors();
-		const heights = this.measureSlotHeights();
-		const layout = computeSlotPositions(anchors, heights);
+		// Only measure linked slots (not orphaned)
+		const linkedHeights = new Map<string, number>();
+		const anchorIds = new Set(
+			anchors.map((a) => a.anchorId)
+		);
+		for (const [id, el] of this.slots) {
+			if (anchorIds.has(id))
+				linkedHeights.set(id, el.offsetHeight);
+		}
+
+		const layout = computeSlotPositions(
+			anchors,
+			linkedHeights
+		);
 
 		for (const sl of layout) {
 			const el = this.slots.get(sl.anchorId);
 			if (el) el.style.top = `${sl.top}px`;
 		}
 
+		// Place orphaned divider below the last positioned slot
 		const srcScroller = this.getSourceScrollEl();
 		const srcHeight = srcScroller?.scrollHeight ?? 0;
 		const total = computeTotalHeight(
 			layout,
-			heights,
+			linkedHeights,
 			srcHeight
 		);
-		this.heightSpacer.style.height = `${total}px`;
+
+		const divider = this.slotsContainer.querySelector(
+			".mn-orphaned-divider"
+		) as HTMLElement | null;
+		if (divider) {
+			divider.style.marginTop = `${total + 20}px`;
+		}
+
+		this.heightSpacer.style.height = `${total + (divider ? divider.offsetHeight + 200 : 0)}px`;
 	}
 
 	async onSourceModified(): Promise<void> {
@@ -237,7 +258,51 @@ export class MarginNotesView extends ItemView {
 				await this.app.vault.cachedRead(file)
 			);
 		}
+		await this.runCleanup();
 		this.renderSlots();
+	}
+
+	/**
+	 * Cleanup: remove orphaned source anchors (anchors in the source
+	 * with no matching note). Never delete notes — orphaned notes
+	 * (notes with no matching source anchor) are kept and shown at
+	 * the bottom as "unlinked".
+	 */
+	private async runCleanup(): Promise<void> {
+		if (!this.sidecar || !this.sourcePath) return;
+
+		const srcFile = this.app.vault.getAbstractFileByPath(
+			this.sourcePath
+		);
+		if (!(srcFile instanceof TFile)) return;
+
+		const srcText = await this.app.vault.cachedRead(srcFile);
+		const { parseAnchors, removeAnchor } = await import(
+			"./anchor"
+		);
+		const srcAnchors = parseAnchors(srcText);
+		const noteIds = new Set(
+			this.sidecar.annotations.map((a) => a.anchorId)
+		);
+
+		// Find source anchors that have no corresponding note
+		const orphanedSrcIds = srcAnchors
+			.map((a) => a.id)
+			.filter((id) => !noteIds.has(id));
+
+		if (orphanedSrcIds.length > 0) {
+			let cleaned = srcText;
+			for (const id of orphanedSrcIds) {
+				cleaned = removeAnchor(cleaned, id);
+			}
+			if (cleaned !== srcText) {
+				this.suppressSave = true;
+				await this.app.vault.modify(srcFile, cleaned);
+				setTimeout(() => {
+					this.suppressSave = false;
+				}, 300);
+			}
+		}
 	}
 
 	focusSlot(anchorId: string): void {
@@ -334,8 +399,40 @@ export class MarginNotesView extends ItemView {
 			return;
 		}
 
+		// Separate linked (have source anchor) from orphaned (no source anchor)
+		const sourceAnchorIds = this.getSourceAnchorIds();
+		const linked: Annotation[] = [];
+		const orphaned: Annotation[] = [];
+
 		for (const ann of this.sidecar.annotations) {
+			if (sourceAnchorIds.has(ann.anchorId)) {
+				linked.push(ann);
+			} else {
+				orphaned.push(ann);
+			}
+		}
+
+		for (const ann of linked) {
 			this.createSlotElement(ann);
+		}
+
+		// Show orphaned notes at the bottom with a label
+		if (orphaned.length > 0) {
+			const divider = this.slotsContainer.createDiv(
+				"mn-orphaned-divider"
+			);
+			divider.createSpan({
+				text: "Unlinked notes",
+				cls: "mn-orphaned-label",
+			});
+			divider.createSpan({
+				text: "Source anchor was removed. These notes are preserved.",
+				cls: "mn-orphaned-hint",
+			});
+
+			for (const ann of orphaned) {
+				this.createSlotElement(ann, true);
+			}
 		}
 
 		if (this.linked) {
@@ -347,9 +444,39 @@ export class MarginNotesView extends ItemView {
 		}
 	}
 
-	private createSlotElement(ann: Annotation): void {
+	/** Get the set of anchor IDs present in the source document. */
+	private getSourceAnchorIds(): Set<string> {
+		const ids = new Set<string>();
+		const srcScroller = this.getSourceScrollEl();
+		if (srcScroller) {
+			srcScroller
+				.querySelectorAll<HTMLElement>("[data-ann-id]")
+				.forEach((el) => {
+					if (el.dataset.annId)
+						ids.add(el.dataset.annId);
+				});
+		}
+		// Also check source text directly (for off-screen anchors)
+		if (this.plugin.splitSourceLeaf) {
+			const v = this.plugin.splitSourceLeaf.view;
+			if (v instanceof MarkdownView && v.editor) {
+				const text = v.editor.getValue();
+				const re = /<!-- ann:(\w+) -->/g;
+				let m;
+				while ((m = re.exec(text)) !== null) {
+					ids.add(m[1]);
+				}
+			}
+		}
+		return ids;
+	}
+
+	private createSlotElement(
+		ann: Annotation,
+		isOrphaned = false
+	): void {
 		const slot = this.slotsContainer.createDiv({
-			cls: "mn-slot",
+			cls: `mn-slot${isOrphaned ? " mn-slot-orphaned" : ""}`,
 			attr: { "data-ann-id": ann.anchorId },
 		});
 		this.slots.set(ann.anchorId, slot);
