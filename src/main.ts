@@ -176,7 +176,13 @@ export default class MarginNotesPlugin extends Plugin {
 	async toggle(): Promise<void> {
 		if (Platform.isMobile) {
 			await this.toggleCardView();
-		} else if (this.splitLeaf) {
+			return;
+		}
+
+		// Check if any notes view is open (handles stale splitLeaf refs)
+		const existingLeaves =
+			this.app.workspace.getLeavesOfType(VIEW_TYPE_NOTES);
+		if (existingLeaves.length > 0 || this.splitLeaf) {
 			this.closeSplit();
 		} else {
 			await this.openSplit();
@@ -247,10 +253,12 @@ export default class MarginNotesPlugin extends Plugin {
 	}
 
 	closeSplit(): void {
-		if (this.splitLeaf) {
-			this.splitLeaf.detach();
-			this.splitLeaf = null;
-		}
+		// Close all notes view leaves (handles stale references too)
+		for (const l of this.app.workspace.getLeavesOfType(
+			VIEW_TYPE_NOTES
+		))
+			l.detach();
+		this.splitLeaf = null;
 		this.splitSourceLeaf = null;
 	}
 

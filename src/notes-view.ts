@@ -232,7 +232,7 @@ export class MarginNotesView extends ItemView {
 			if (el) el.style.top = `${sl.top}px`;
 		}
 
-		// Place orphaned divider below the last positioned slot
+		// Place orphaned divider just below the source document's end
 		const srcScroller = this.getSourceScrollEl();
 		const srcHeight = srcScroller?.scrollHeight ?? 0;
 		const total = computeTotalHeight(
@@ -245,10 +245,18 @@ export class MarginNotesView extends ItemView {
 			".mn-orphaned-divider"
 		) as HTMLElement | null;
 		if (divider) {
-			divider.style.marginTop = `${total + 20}px`;
+			// Position at the end of the source content
+			divider.style.position = "absolute";
+			divider.style.top = `${srcHeight + 20}px`;
+			divider.style.left = "0";
+			divider.style.right = "0";
 		}
 
-		this.heightSpacer.style.height = `${total + (divider ? divider.offsetHeight + 200 : 0)}px`;
+		// Total height: source height + orphaned section
+		const orphanedHeight = divider
+			? divider.offsetHeight + 100
+			: 0;
+		this.heightSpacer.style.height = `${Math.max(total, srcHeight) + orphanedHeight}px`;
 	}
 
 	async onSourceModified(): Promise<void> {
@@ -376,6 +384,8 @@ export class MarginNotesView extends ItemView {
 			const srcEl = this.getSourceScrollEl();
 			if (srcEl) {
 				this.scrollSync.attach(srcEl, this.scrollEl);
+				// Sync scroll position to match source
+				this.scrollEl.scrollTop = srcEl.scrollTop;
 			}
 		} else {
 			this.scrollSync.detach();
