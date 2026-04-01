@@ -232,15 +232,25 @@ export class MarginNotesView extends ItemView {
 			if (el) el.style.top = `${sl.top}px`;
 		}
 
-		// Place orphaned section 25px below the source document's end
+		// Place orphaned section 25px below the lowest linked note
 		const srcScroller = this.getSourceScrollEl();
 		const srcHeight = srcScroller?.scrollHeight ?? 0;
+
+		// Find the bottom of the lowest linked note
+		let lowestBottom = srcHeight;
+		for (const sl of layout) {
+			const el = this.slots.get(sl.anchorId);
+			if (el) {
+				const bottom = sl.top + el.offsetHeight;
+				if (bottom > lowestBottom) lowestBottom = bottom;
+			}
+		}
 
 		const divider = this.slotsContainer.querySelector(
 			".mn-orphaned-divider"
 		) as HTMLElement | null;
 
-		let orphanedBottom = srcHeight + 25;
+		let orphanedBottom = lowestBottom + 25;
 
 		if (divider) {
 			divider.style.position = "absolute";
@@ -830,28 +840,34 @@ export class MarginNotesView extends ItemView {
 
 	// ── Measurement ────────────────────────────────────────────
 
+	/**
+	 * Measure anchor positions using CM6's lineBlockAt — works for
+	 * ALL anchors in the document, not just those visible in the
+	 * viewport (CM6 only renders DOM elements for visible lines).
+	 */
 	private measureSourceAnchors(): AnchorMeasurement[] {
-		const srcScroller = this.getSourceScrollEl();
-		if (!srcScroller) return [];
+		if (!this.plugin.splitSourceLeaf) return [];
+		const view = this.plugin.splitSourceLeaf.view;
+		if (!(view instanceof MarkdownView)) return [];
 
+		// @ts-ignore — accessing internal CM6 editor
+		const cmView = (view.editor as any).cm;
+		if (!cmView) return [];
+
+		const doc = cmView.state.doc;
+		const re = /<!-- ann:(\w+) -->/;
 		const anchors: AnchorMeasurement[] = [];
-		const els =
-			srcScroller.querySelectorAll<HTMLElement>(
-				"[data-ann-id]"
-			);
 
-		for (const el of els) {
-			const id = el.dataset.annId;
-			if (!id) continue;
-			const elRect = el.getBoundingClientRect();
-			const cRect = srcScroller.getBoundingClientRect();
-			anchors.push({
-				anchorId: id,
-				sourceY:
-					elRect.top -
-					cRect.top +
-					srcScroller.scrollTop,
-			});
+		for (let i = 1; i <= doc.lines; i++) {
+			const line = doc.line(i);
+			const m = re.exec(line.text);
+			if (m) {
+				const block = cmView.lineBlockAt(line.from);
+				anchors.push({
+					anchorId: m[1],
+					sourceY: block.top,
+				});
+			}
 		}
 
 		return anchors.sort((a, b) => a.sourceY - b.sourceY);
