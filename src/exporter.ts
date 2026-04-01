@@ -166,47 +166,46 @@ function buildTuftePage(
 	let body = "";
 
 	for (const g of groups) {
-		let srcHtml = g.sourceHtml;
-
 		if (g.annotationHtml) {
 			n++;
-			const label = `sn-${n}`;
+			const id = `sn-${n}`;
 
-			// Build the sidenote inline elements
-			const numLabel = s.exportShowNumbers
-				? `<label for="${label}" class="margin-toggle sidenote-number"></label>`
-				: `<label for="${label}" class="margin-toggle">&#8853;</label>`;
-			const toggle = `<input type="checkbox" id="${label}" class="margin-toggle"/>`;
-			// Strip <p> wrappers from annotation HTML since it goes
-			// inside a <span> (block elements inside inline = broken DOM).
-			// For multi-paragraph notes, use <br> between paragraphs.
-			const cleanAnn = g.annotationHtml
-				.replace(/<p>/g, "")
-				.replace(/<\/p>/g, "<br>")
-				.replace(/<br>\s*$/, "")  // remove trailing <br>
-				.trim();
+			// The sidenote is a <div> placed BEFORE the source
+			// paragraph. Using <div> (not <span> inside <p>)
+			// because annotation HTML from MarkdownRenderer can
+			// contain block elements (<p>, <ul>, <pre>, <table>).
+			// Block-in-inline breaks the browser's DOM parser.
+			// The float positions it in the right margin; placing
+			// it before the source aligns it with the paragraph top.
 
-			const cls = s.exportShowNumbers
-				? "sidenote"
-				: "marginnote";
-			const note = `<span class="${cls}">${cleanAnn}</span>`;
-			const injection = numLabel + toggle + note;
+			const numPrefix = s.exportShowNumbers
+				? `<span class="sn-num">${n}</span> `
+				: "";
 
-			// Inject sidenote INSIDE the last <p> tag of the source HTML
-			// This is how tufte-css works — notes are inline in paragraphs
-			const lastP = srcHtml.lastIndexOf("</p>");
-			if (lastP >= 0) {
-				srcHtml =
-					srcHtml.substring(0, lastP) +
-					injection +
-					srcHtml.substring(lastP);
+			// Hidden checkbox for mobile toggle
+			body += `<input type="checkbox" id="${id}" class="margin-toggle"/>\n`;
+			// The sidenote itself
+			body += `<div class="sidenote">${numPrefix}${g.annotationHtml}</div>\n`;
+
+			// Source paragraph, with optional reference number
+			if (s.exportShowNumbers) {
+				const ref = `<label for="${id}" class="margin-toggle sn-ref"><sup>${n}</sup></label>`;
+				const lastP = g.sourceHtml.lastIndexOf("</p>");
+				if (lastP >= 0) {
+					body +=
+						g.sourceHtml.substring(0, lastP) +
+						ref +
+						g.sourceHtml.substring(lastP) +
+						"\n";
+				} else {
+					body += g.sourceHtml + ref + "\n";
+				}
 			} else {
-				// No <p> — wrap everything
-				srcHtml = `<p>${srcHtml}${injection}</p>`;
+				body += g.sourceHtml + "\n";
 			}
+		} else {
+			body += g.sourceHtml + "\n";
 		}
-
-		body += srcHtml + "\n";
 	}
 
 	return `<!DOCTYPE html>
@@ -436,70 +435,55 @@ img { max-width: 100%; }
 
 /* ── Sidenotes ──────────────────────────────────────────── */
 
-.sidenote, .marginnote {
+/* Using <div> (not <span>) so annotation HTML can contain any
+   block elements. Placed BEFORE the source paragraph in the DOM
+   so the float aligns with the paragraph's top. */
+
+.sidenote {
   float: right;
   clear: right;
   margin-right: -60%;
   width: 50%;
-  margin-top: 0.3rem;
-  margin-bottom: 0;
+  margin-top: 0;
+  margin-bottom: 1rem;
   font-size: 1.1rem;
   line-height: 1.3;
-  vertical-align: baseline;
   position: relative;
 }
 
-.sidenote-number {
-  counter-increment: sidenote-counter;
+/* Reference number in the source text */
+.sn-ref {
+  cursor: pointer;
+  color: inherit;
+}
+.sn-ref sup {
+  font-size: 0.75em;
+  vertical-align: super;
+  line-height: 0;
+  margin-left: 0.1em;
 }
 
-.sidenote-number:after,
-.sidenote:before {
-  position: relative;
-  vertical-align: baseline;
-}
-
-.sidenote-number:after {
-  content: counter(sidenote-counter);
-  font-size: 1rem;
-  top: -0.5rem;
-  left: 0.1rem;
-}
-
-.sidenote:before {
-  content: counter(sidenote-counter) " ";
-  font-size: 1rem;
-  top: -0.5rem;
-}
-
-blockquote .sidenote,
-blockquote .marginnote {
-  margin-right: -82%;
-  min-width: 59%;
-  text-align: left;
+/* Number prefix in the sidenote */
+.sn-num {
+  font-weight: 600;
+  font-size: 0.9em;
 }
 
 input.margin-toggle { display: none; }
 
-label.sidenote-number {
-  display: inline-block;
-  max-height: 2rem;
-}
-
-label.margin-toggle:not(.sidenote-number) {
-  display: none;
-}
-
 /* Paragraphs inside sidenotes: full width, smaller text */
-.sidenote p, .marginnote p {
-  width: 100%;
+.sidenote p {
+  width: 100% !important;
   font-size: 1.1rem;
   line-height: 1.3;
   margin-top: 0.3rem;
   margin-bottom: 0.3rem;
 }
-.sidenote p:first-child, .marginnote p:first-child { margin-top: 0; }
-.sidenote p:last-child, .marginnote p:last-child { margin-bottom: 0; }
+.sidenote p:first-child { margin-top: 0; }
+.sidenote p:last-child { margin-bottom: 0; }
+.sidenote ul, .sidenote ol { width: 100%; font-size: 1.1rem; }
+.sidenote pre { width: 100%; }
+.sidenote table { width: 100%; font-size: 0.95rem; }
 
 /* Code */
 code, pre > code {
@@ -550,23 +534,26 @@ span.newthought {
   blockquote { margin-left: 1.5em; margin-right: 0; }
   blockquote p, blockquote footer { width: 100%; }
 
-  label.margin-toggle:not(.sidenote-number) { display: inline; }
+  /* On mobile: hide sidenotes, show via checkbox toggle */
+  .sidenote { display: none; }
 
-  .sidenote, .marginnote { display: none; }
+  .sn-ref { color: var(--accent, #4a6fa5); cursor: pointer; }
 
-  .margin-toggle:checked + .sidenote,
-  .margin-toggle:checked + .marginnote {
+  .margin-toggle:checked + .sidenote {
     display: block;
-    float: left;
-    left: 1rem;
+    float: none;
     clear: both;
     width: 95%;
     margin: 1rem 2.5%;
-    vertical-align: baseline;
+    margin-right: 0;
     position: relative;
+    background: rgba(0,0,0,.03);
+    padding: .75rem 1rem;
+    border-left: 3px solid #999;
+    border-radius: 0 4px 4px 0;
   }
 
-  label { cursor: pointer; }
+  label.sn-ref { cursor: pointer; }
 
   img { width: 100%; }
 }
