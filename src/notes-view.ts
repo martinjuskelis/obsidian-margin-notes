@@ -380,18 +380,43 @@ export class MarginNotesView extends ItemView {
 			}
 		}
 
+		this.renderSlots();
+
 		if (this.linked) {
-			const srcEl = this.getSourceScrollEl();
-			if (srcEl) {
-				this.scrollSync.attach(srcEl, this.scrollEl);
-				// Sync scroll position to match source
-				this.scrollEl.scrollTop = srcEl.scrollTop;
-			}
+			// Reposition after render, then sync scroll
+			this.scheduleReposition(() => {
+				const srcEl = this.getSourceScrollEl();
+				if (srcEl) {
+					this.scrollSync.attach(srcEl, this.scrollEl);
+					this.scrollEl.scrollTop = srcEl.scrollTop;
+				}
+			});
 		} else {
 			this.scrollSync.detach();
 		}
+	}
 
-		this.renderSlots();
+	/**
+	 * Schedule repositioning with retries. Source anchor elements
+	 * may not be in the DOM yet (CM6 renders lazily), so retry
+	 * a few times.
+	 */
+	private scheduleReposition(onDone?: () => void): void {
+		let attempts = 0;
+		const tryPosition = () => {
+			this.repositionSlots();
+			attempts++;
+			// Check if we actually got positions (not all at 0)
+			const gotPositions = this.measureSourceAnchors().length > 0;
+			if (!gotPositions && attempts < 5) {
+				setTimeout(tryPosition, 100);
+			} else if (onDone) {
+				onDone();
+			}
+		};
+		requestAnimationFrame(() => {
+			requestAnimationFrame(tryPosition);
+		});
 	}
 
 	// ── Rendering ──────────────────────────────────────────────
@@ -459,11 +484,7 @@ export class MarginNotesView extends ItemView {
 		}
 
 		if (this.linked) {
-			requestAnimationFrame(() => {
-				requestAnimationFrame(() => {
-					this.repositionSlots();
-				});
-			});
+			this.scheduleReposition();
 		}
 	}
 

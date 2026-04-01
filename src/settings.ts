@@ -24,7 +24,7 @@ export class MarginNotesSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Highlight source lines")
 			.setDesc(
-				"Show a colored highlight on source paragraphs that have annotations, and when hovering notes."
+				"Show a blue right-side border on source lines that have annotations."
 			)
 			.addToggle((toggle) =>
 				toggle

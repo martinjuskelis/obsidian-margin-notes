@@ -384,7 +384,8 @@ export default class MarginNotesPlugin extends Plugin {
 	// ── Source highlighting ────────────────────────────────────
 
 	highlightSource(anchorId: string): void {
-		if (!this.settings.showSourceHighlight) return;
+		// Hover highlight always works — the setting controls only
+		// the static right-border on anchored lines
 		const el = this.findSourceEl(anchorId);
 		if (el) el.classList.add("margin-notes-highlight");
 	}

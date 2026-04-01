@@ -423,13 +423,10 @@
 	transition: background-color 0.2s ease;
 }
 
-/* When highlights are disabled via settings */
+/* When "Highlight source lines" is off — hide only the static border */
 .mn-no-highlights .margin-notes-anchored {
 	border-right: none;
 	padding-right: 0;
-}
-.mn-no-highlights .margin-notes-highlight {
-	background-color: transparent !important;
 }
 
 .margin-notes-flash {
