@@ -682,7 +682,11 @@ export default class MarginNotesPlugin extends Plugin {
 			? active.path.replace(/\.ann\.md$/, ".md")
 			: active.path;
 		try {
-			const html = await exportToHtml(this.app, src);
+			const html = await exportToHtml(
+					this.app,
+					src,
+					this.settings
+				);
 			const ep = src.replace(/\.md$/, ".html");
 			const ef = this.app.vault.getAbstractFileByPath(ep);
 			if (ef instanceof TFile)
