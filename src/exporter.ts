@@ -380,21 +380,31 @@ p {
   vertical-align: baseline;
 }
 
-blockquote { font-size: 1.4rem; }
+blockquote { font-size: 1.4rem; overflow: visible; }
 blockquote p { width: 55%; margin-right: 40px; }
 blockquote footer { width: 55%; font-size: 1.1rem; text-align: right; }
 
-section > p,
-section > footer,
-section > table {
+/* Sidenotes inside paragraphs need the paragraph to not clip */
+p { overflow: visible; }
+
+/* Content width — use descendant selectors since Obsidian's
+   renderer may wrap content in extra divs */
+section p,
+section footer,
+section table {
   width: 55%;
 }
 
-section > dl,
-section > ol,
-section > ul {
+section dl,
+section ol,
+section ul {
   width: 50%;
   -webkit-padding-start: 5%;
+}
+
+/* Ensure floated sidenotes are not clipped */
+section, article, p {
+  overflow: visible;
 }
 
 figure {
@@ -468,8 +478,9 @@ label.margin-toggle:not(.sidenote-number) {
   display: none;
 }
 
-/* Remove paragraph margins inside sidenotes */
+/* Paragraphs inside sidenotes: full width, smaller text */
 .sidenote p, .marginnote p {
+  width: 100%;
   font-size: 1.1rem;
   line-height: 1.3;
   margin-top: 0.3rem;
