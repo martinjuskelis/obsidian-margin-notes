@@ -177,7 +177,19 @@ function buildTuftePage(
 				? `<label for="${label}" class="margin-toggle sidenote-number"></label>`
 				: `<label for="${label}" class="margin-toggle">&#8853;</label>`;
 			const toggle = `<input type="checkbox" id="${label}" class="margin-toggle"/>`;
-			const note = `<span class="${s.exportShowNumbers ? "sidenote" : "marginnote"}">${g.annotationHtml}</span>`;
+			// Strip <p> wrappers from annotation HTML since it goes
+			// inside a <span> (block elements inside inline = broken DOM).
+			// For multi-paragraph notes, use <br> between paragraphs.
+			const cleanAnn = g.annotationHtml
+				.replace(/<p>/g, "")
+				.replace(/<\/p>/g, "<br>")
+				.replace(/<br>\s*$/, "")  // remove trailing <br>
+				.trim();
+
+			const cls = s.exportShowNumbers
+				? "sidenote"
+				: "marginnote";
+			const note = `<span class="${cls}">${cleanAnn}</span>`;
 			const injection = numLabel + toggle + note;
 
 			// Inject sidenote INSIDE the last <p> tag of the source HTML
