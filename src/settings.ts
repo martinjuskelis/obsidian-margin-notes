@@ -3,10 +3,12 @@ import type MarginNotesPlugin from "./main";
 
 export interface MarginNotesSettings {
 	showSourceHighlight: boolean;
+	autoRelinkOnEditMode: boolean;
 }
 
 export const DEFAULT_SETTINGS: MarginNotesSettings = {
 	showSourceHighlight: true,
+	autoRelinkOnEditMode: true,
 };
 
 export class MarginNotesSettingTab extends PluginSettingTab {
@@ -33,6 +35,23 @@ export class MarginNotesSettingTab extends PluginSettingTab {
 						this.plugin.settings.showSourceHighlight = value;
 						await this.plugin.saveSettings();
 						this.plugin.updateHighlightVisibility();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Auto-relink on edit mode")
+			.setDesc(
+				"Automatically re-enable scroll sync when switching back to editing mode from reading mode."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(
+						this.plugin.settings.autoRelinkOnEditMode
+					)
+					.onChange(async (value) => {
+						this.plugin.settings.autoRelinkOnEditMode =
+							value;
+						await this.plugin.saveSettings();
 					})
 			);
 	}

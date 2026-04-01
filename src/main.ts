@@ -37,6 +37,8 @@ export default class MarginNotesPlugin extends Plugin {
 	splitSourceLeaf: WorkspaceLeaf | null = null;
 	/** Debounce timer for repositioning. */
 	private repositionTimer: number | null = null;
+	/** Last known source editor mode ('source' or 'preview'). */
+	private lastSourceMode: string | null = null;
 
 	async onload(): Promise<void> {
 		// ── Settings ───────────────────────────────────────────
@@ -143,9 +145,10 @@ export default class MarginNotesPlugin extends Plugin {
 			)
 		);
 		this.registerEvent(
-			this.app.workspace.on("layout-change", () =>
-				this.scheduleReposition()
-			)
+			this.app.workspace.on("layout-change", () => {
+				this.handleModeChange();
+				this.scheduleReposition();
+			})
 		);
 		this.registerEvent(
 			this.app.workspace.on("resize", () =>
@@ -236,6 +239,7 @@ export default class MarginNotesPlugin extends Plugin {
 			"vertical"
 		);
 		this.splitSourceLeaf = srcLeaf;
+		this.lastSourceMode = (srcLeaf.view as MarkdownView).getMode();
 
 		await this.splitLeaf.setViewState({
 			type: VIEW_TYPE_NOTES,
@@ -260,6 +264,44 @@ export default class MarginNotesPlugin extends Plugin {
 			l.detach();
 		this.splitLeaf = null;
 		this.splitSourceLeaf = null;
+	}
+
+	/**
+	 * Detect when the source editor switches between editing and
+	 * reading mode. Unsync on any mode change; optionally auto-relink
+	 * when returning to editing mode.
+	 */
+	private handleModeChange(): void {
+		if (!this.splitSourceLeaf) return;
+		const v = this.splitSourceLeaf.view;
+		if (!(v instanceof MarkdownView)) return;
+
+		const currentMode = v.getMode(); // 'source' or 'preview'
+		if (this.lastSourceMode === null) {
+			this.lastSourceMode = currentMode;
+			return;
+		}
+
+		if (currentMode === this.lastSourceMode) return;
+
+		const prevMode = this.lastSourceMode;
+		this.lastSourceMode = currentMode;
+
+		const nv = this.getNotesView();
+		if (!nv) return;
+
+		// Mode changed — unsync
+		nv.setLinked(false);
+
+		// Auto-relink when returning to editing mode
+		if (
+			currentMode === "source" &&
+			prevMode === "preview" &&
+			this.settings.autoRelinkOnEditMode
+		) {
+			// Small delay so the editor DOM settles
+			setTimeout(() => nv.setLinked(true), 400);
+		}
 	}
 
 	private findSourceLeaf(): {

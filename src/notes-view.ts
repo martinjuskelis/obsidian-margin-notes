@@ -147,6 +147,12 @@ export class MarginNotesView extends ItemView {
 		return this.linked;
 	}
 
+	/** Programmatically set linked state (used by mode-change handler). */
+	setLinked(linked: boolean): void {
+		if (this.linked === linked) return;
+		this.toggleLinked();
+	}
+
 	async loadForSource(
 		sourcePath: string,
 		sourceScrollEl: HTMLElement
@@ -841,15 +847,25 @@ export class MarginNotesView extends ItemView {
 	// ── Measurement ────────────────────────────────────────────
 
 	/**
-	 * Measure anchor positions using CM6's lineBlockAt — works for
-	 * ALL anchors in the document, not just those visible in the
-	 * viewport (CM6 only renders DOM elements for visible lines).
+	 * Measure anchor positions in the source editor.
+	 * - Editing mode: uses CM6's lineBlockAt (accurate for all lines).
+	 * - Reading mode: uses DOM elements tagged by the post-processor.
 	 */
 	private measureSourceAnchors(): AnchorMeasurement[] {
 		if (!this.plugin.splitSourceLeaf) return [];
 		const view = this.plugin.splitSourceLeaf.view;
 		if (!(view instanceof MarkdownView)) return [];
 
+		if (view.getMode() === "source") {
+			return this.measureAnchorsEditMode(view);
+		} else {
+			return this.measureAnchorsReadingMode(view);
+		}
+	}
+
+	private measureAnchorsEditMode(
+		view: MarkdownView
+	): AnchorMeasurement[] {
 		// @ts-ignore — accessing internal CM6 editor
 		const cmView = (view.editor as any).cm;
 		if (!cmView) return [];
@@ -868,6 +884,37 @@ export class MarginNotesView extends ItemView {
 					sourceY: block.top,
 				});
 			}
+		}
+
+		return anchors.sort((a, b) => a.sourceY - b.sourceY);
+	}
+
+	private measureAnchorsReadingMode(
+		view: MarkdownView
+	): AnchorMeasurement[] {
+		const scroller = view.containerEl.querySelector(
+			".markdown-preview-view"
+		) as HTMLElement | null;
+		if (!scroller) return [];
+
+		const anchors: AnchorMeasurement[] = [];
+		const els =
+			scroller.querySelectorAll<HTMLElement>(
+				"[data-ann-id]"
+			);
+		const scrollerRect = scroller.getBoundingClientRect();
+
+		for (const el of els) {
+			const id = el.dataset.annId;
+			if (!id) continue;
+			const elRect = el.getBoundingClientRect();
+			anchors.push({
+				anchorId: id,
+				sourceY:
+					elRect.top -
+					scrollerRect.top +
+					scroller.scrollTop,
+			});
 		}
 
 		return anchors.sort((a, b) => a.sourceY - b.sourceY);
