@@ -232,31 +232,44 @@ export class MarginNotesView extends ItemView {
 			if (el) el.style.top = `${sl.top}px`;
 		}
 
-		// Place orphaned divider just below the source document's end
+		// Place orphaned section 25px below the source document's end
 		const srcScroller = this.getSourceScrollEl();
 		const srcHeight = srcScroller?.scrollHeight ?? 0;
+
+		const divider = this.slotsContainer.querySelector(
+			".mn-orphaned-divider"
+		) as HTMLElement | null;
+
+		let orphanedBottom = srcHeight + 25;
+
+		if (divider) {
+			divider.style.position = "absolute";
+			divider.style.top = `${orphanedBottom}px`;
+			divider.style.left = "0";
+			divider.style.right = "0";
+			orphanedBottom += divider.offsetHeight + 8;
+		}
+
+		// Position each orphaned slot below the divider, stacked
+		const orphanedSlots =
+			this.slotsContainer.querySelectorAll<HTMLElement>(
+				".mn-slot-orphaned"
+			);
+		for (const el of orphanedSlots) {
+			el.style.position = "absolute";
+			el.style.top = `${orphanedBottom}px`;
+			el.style.left = "8px";
+			el.style.right = "8px";
+			orphanedBottom += el.offsetHeight + 8;
+		}
+
+		// Total height: enough for everything
 		const total = computeTotalHeight(
 			layout,
 			linkedHeights,
 			srcHeight
 		);
-
-		const divider = this.slotsContainer.querySelector(
-			".mn-orphaned-divider"
-		) as HTMLElement | null;
-		if (divider) {
-			// Position at the end of the source content
-			divider.style.position = "absolute";
-			divider.style.top = `${srcHeight + 20}px`;
-			divider.style.left = "0";
-			divider.style.right = "0";
-		}
-
-		// Total height: source height + orphaned section
-		const orphanedHeight = divider
-			? divider.offsetHeight + 100
-			: 0;
-		this.heightSpacer.style.height = `${Math.max(total, srcHeight) + orphanedHeight}px`;
+		this.heightSpacer.style.height = `${Math.max(total, orphanedBottom + 40)}px`;
 	}
 
 	async onSourceModified(): Promise<void> {

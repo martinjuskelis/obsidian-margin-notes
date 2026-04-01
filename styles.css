@@ -118,14 +118,15 @@
 	opacity: 1;
 }
 
-/* Orphaned notes always in list mode (not positioned) */
-.mn-slots-linked .mn-slot-orphaned {
+/* In list mode (unlinked), orphaned slots flow normally */
+.mn-slots-list .mn-slot-orphaned {
 	position: relative !important;
 	top: auto !important;
 	left: auto;
 	right: auto;
 	margin-bottom: 8px;
 }
+/* In linked mode, orphaned slots are absolutely positioned by JS */
 
 .mn-orphaned-divider {
 	display: flex;
