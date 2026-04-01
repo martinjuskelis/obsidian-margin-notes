@@ -169,40 +169,32 @@ function buildTuftePage(
 		if (g.annotationHtml) {
 			n++;
 			const id = `sn-${n}`;
-
-			// The sidenote is a <div> placed BEFORE the source
-			// paragraph. Using <div> (not <span> inside <p>)
-			// because annotation HTML from MarkdownRenderer can
-			// contain block elements (<p>, <ul>, <pre>, <table>).
-			// Block-in-inline breaks the browser's DOM parser.
-			// The float positions it in the right margin; placing
-			// it before the source aligns it with the paragraph top.
-
 			const numPrefix = s.exportShowNumbers
-				? `<span class="sn-num">${n}</span> `
+				? `<span class="sn-num">${n}.</span> `
 				: "";
 
-			// Hidden checkbox for mobile toggle
-			body += `<input type="checkbox" id="${id}" class="margin-toggle"/>\n`;
-			// The sidenote itself
-			body += `<div class="sidenote">${numPrefix}${g.annotationHtml}</div>\n`;
-
-			// Source paragraph, with optional reference number
+			// Wrap source + sidenote in a container so the sidenote
+			// can be absolutely positioned in the margin relative
+			// to its source paragraph.
+			let srcHtml = g.sourceHtml;
 			if (s.exportShowNumbers) {
 				const ref = `<label for="${id}" class="margin-toggle sn-ref"><sup>${n}</sup></label>`;
-				const lastP = g.sourceHtml.lastIndexOf("</p>");
+				const lastP = srcHtml.lastIndexOf("</p>");
 				if (lastP >= 0) {
-					body +=
-						g.sourceHtml.substring(0, lastP) +
+					srcHtml =
+						srcHtml.substring(0, lastP) +
 						ref +
-						g.sourceHtml.substring(lastP) +
-						"\n";
+						srcHtml.substring(lastP);
 				} else {
-					body += g.sourceHtml + ref + "\n";
+					srcHtml += ref;
 				}
-			} else {
-				body += g.sourceHtml + "\n";
 			}
+
+			body += `<div class="sn-group">\n`;
+			body += `<div class="sn-source">${srcHtml}</div>\n`;
+			body += `<input type="checkbox" id="${id}" class="margin-toggle"/>\n`;
+			body += `<div class="sidenote">${numPrefix}${g.annotationHtml}</div>\n`;
+			body += `</div>\n`;
 		} else {
 			body += g.sourceHtml + "\n";
 		}
@@ -435,23 +427,29 @@ img { max-width: 100%; }
 
 /* ── Sidenotes ──────────────────────────────────────────── */
 
-/* Using <div> (not <span>) so annotation HTML can contain any
-   block elements. Placed BEFORE the source paragraph in the DOM
-   so the float aligns with the paragraph's top. */
+/* Each annotated paragraph is wrapped in .sn-group which acts
+   as the positioning context. The source stays at 55% width,
+   the sidenote is absolutely positioned in the remaining margin. */
 
-.sidenote {
-  float: right;
-  clear: right;
-  margin-right: -60%;
-  width: 50%;
-  margin-top: 0;
-  margin-bottom: 1rem;
-  font-size: 1.1rem;
-  line-height: 1.3;
+.sn-group {
   position: relative;
+  overflow: visible;
 }
 
-/* Reference number in the source text */
+.sn-source {
+  width: 55%;
+}
+.sn-source p { width: 100%; }
+
+.sidenote {
+  position: absolute;
+  top: 0;
+  left: 58%;        /* 55% content + 3% gap */
+  width: 40%;       /* fills most of the remaining margin */
+  font-size: 1.1rem;
+  line-height: 1.3;
+}
+
 .sn-ref {
   cursor: pointer;
   color: inherit;
@@ -463,7 +461,6 @@ img { max-width: 100%; }
   margin-left: 0.1em;
 }
 
-/* Number prefix in the sidenote */
 .sn-num {
   font-weight: 600;
   font-size: 0.9em;
@@ -471,7 +468,7 @@ img { max-width: 100%; }
 
 input.margin-toggle { display: none; }
 
-/* Paragraphs inside sidenotes: full width, smaller text */
+/* Content inside sidenotes: full width, proper sizing */
 .sidenote p {
   width: 100% !important;
   font-size: 1.1rem;
@@ -534,26 +531,21 @@ span.newthought {
   blockquote { margin-left: 1.5em; margin-right: 0; }
   blockquote p, blockquote footer { width: 100%; }
 
-  /* On mobile: hide sidenotes, show via checkbox toggle */
-  .sidenote { display: none; }
+  /* On mobile: stack sidenotes below source */
+  .sn-source { width: 100%; }
+  .sn-source p { width: 100%; }
 
-  .sn-ref { color: var(--accent, #4a6fa5); cursor: pointer; }
-
-  .margin-toggle:checked + .sidenote {
-    display: block;
-    float: none;
-    clear: both;
-    width: 95%;
-    margin: 1rem 2.5%;
-    margin-right: 0;
+  .sidenote {
     position: relative;
-    background: rgba(0,0,0,.03);
+    top: auto;
+    left: auto;
+    width: 100%;
+    margin: .5rem 0 1.5rem;
     padding: .75rem 1rem;
+    background: rgba(0,0,0,.03);
     border-left: 3px solid #999;
     border-radius: 0 4px 4px 0;
   }
-
-  label.sn-ref { cursor: pointer; }
 
   img { width: 100%; }
 }
