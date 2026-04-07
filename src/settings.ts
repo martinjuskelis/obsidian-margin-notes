@@ -1,5 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type MarginNotesPlugin from "./main";
+import type { AnchorFormat } from "./anchor";
 
 export type ExportLayout = "side-by-side" | "tufte" | "inline" | "footnotes";
 export type ExportTheme = "light" | "dark" | "sepia" | "academic";
@@ -7,6 +8,7 @@ export type ExportFont = "system" | "serif" | "sans";
 export type ExportRatio = "3:2" | "1:1" | "2:1";
 
 export interface MarginNotesSettings {
+	anchorFormat: AnchorFormat;
 	showSourceHighlight: boolean;
 	autoRelinkOnEditMode: boolean;
 	// Export
@@ -19,6 +21,7 @@ export interface MarginNotesSettings {
 }
 
 export const DEFAULT_SETTINGS: MarginNotesSettings = {
+	anchorFormat: "block-id",
 	showSourceHighlight: true,
 	autoRelinkOnEditMode: true,
 	exportLayout: "side-by-side",
@@ -43,6 +46,25 @@ export class MarginNotesSettingTab extends PluginSettingTab {
 
 		// ── General ────────────────────────────────────────────
 		containerEl.createEl("h3", { text: "General" });
+
+		new Setting(containerEl)
+			.setName("Anchor format")
+			.setDesc(
+				"How new annotation anchors are written into source files. " +
+				"Block ID (^mn-…) integrates with Obsidian links and backlinks. " +
+				"HTML comment (<!-- ann:… -->) is invisible but opaque to Obsidian. " +
+				"Both formats are always recognised regardless of this setting."
+			)
+			.addDropdown((d) =>
+				d
+					.addOption("block-id", "Block ID (^mn-…) — recommended")
+					.addOption("html-comment", "HTML comment (<!-- ann:… -->)")
+					.setValue(this.plugin.settings.anchorFormat)
+					.onChange(async (v) => {
+						this.plugin.settings.anchorFormat = v as AnchorFormat;
+						await this.plugin.saveSettings();
+					})
+			);
 
 		new Setting(containerEl)
 			.setName("Highlight source lines")

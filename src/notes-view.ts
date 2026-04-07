@@ -33,7 +33,7 @@ import {
 	computeTotalHeight,
 } from "./alignment";
 import type { AnchorMeasurement } from "./alignment";
-import { ANCHOR_RE } from "./anchor";
+import { ANCHOR_RE, ANCHOR_RE_GM, anchorIdFromMatch, lineHasAnchor } from "./anchor";
 import { ScrollSync } from "./scroll-sync";
 
 export const VIEW_TYPE_NOTES = "margin-notes-aligned-view";
@@ -534,10 +534,10 @@ export class MarginNotesView extends ItemView {
 			const v = this.plugin.splitSourceLeaf.view;
 			if (v instanceof MarkdownView && v.editor) {
 				const text = v.editor.getValue();
-				const re = /<!-- ann:(\w+) -->/g;
+				const re = new RegExp(ANCHOR_RE_GM.source, ANCHOR_RE_GM.flags);
 				let m;
 				while ((m = re.exec(text)) !== null) {
-					ids.add(m[1]);
+					ids.add(anchorIdFromMatch(m));
 				}
 			}
 		}
@@ -871,16 +871,15 @@ export class MarginNotesView extends ItemView {
 		if (!cmView) return [];
 
 		const doc = cmView.state.doc;
-		const re = /<!-- ann:(\w+) -->/;
 		const anchors: AnchorMeasurement[] = [];
 
 		for (let i = 1; i <= doc.lines; i++) {
 			const line = doc.line(i);
-			const m = re.exec(line.text);
+			const m = ANCHOR_RE.exec(line.text);
 			if (m) {
 				const block = cmView.lineBlockAt(line.from);
 				anchors.push({
-					anchorId: m[1],
+					anchorId: anchorIdFromMatch(m),
 					sourceY: block.top,
 				});
 			}
@@ -950,7 +949,7 @@ export class MarginNotesView extends ItemView {
 
 		const block = cmView.lineBlockAtHeight(y);
 		const line = cmView.state.doc.lineAt(block.from);
-		if (ANCHOR_RE.test(line.text)) return null;
+		if (lineHasAnchor(line.text)) return null;
 
 		return line.number;
 	}

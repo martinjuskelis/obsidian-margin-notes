@@ -1,8 +1,8 @@
 /**
  * CodeMirror 6 ViewPlugin for Live Preview.
  *
- * Scans visible lines for <!-- ann:ID --> anchors and adds line decorations
- * with data-ann-id attributes. This enables:
+ * Scans visible lines for anchor markers (both <!-- ann:ID --> and ^mn-ID)
+ * and adds line decorations with data-ann-id attributes. This enables:
  *   - Scroll sync (finding anchor positions in the editor DOM)
  *   - Hover highlighting (CSS/JS can target [data-ann-id])
  */
@@ -15,8 +15,7 @@ import {
 	EditorView,
 } from "@codemirror/view";
 import { RangeSetBuilder } from "@codemirror/state";
-
-const ANCHOR_RE = /<!-- ann:(\w+) -->/;
+import { ANCHOR_RE, anchorIdFromMatch } from "./anchor";
 
 class AnnotationDecoPlugin {
 	decorations: DecorationSet;
@@ -45,7 +44,7 @@ class AnnotationDecoPlugin {
 						line.from,
 						Decoration.line({
 							attributes: {
-								"data-ann-id": m[1],
+								"data-ann-id": anchorIdFromMatch(m),
 								class: "margin-notes-anchored",
 							},
 						})

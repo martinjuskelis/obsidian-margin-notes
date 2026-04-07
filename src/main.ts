@@ -10,7 +10,15 @@ import {
 import { EditorView } from "@codemirror/view";
 import { MarginNotesView, VIEW_TYPE_NOTES } from "./notes-view";
 import { annotationLinePlugin } from "./cm-extension";
-import { generateId, ANCHOR_RE, removeAnchor } from "./anchor";
+import {
+	generateId,
+	ANCHOR_RE,
+	anchorIdFromMatch,
+	removeAnchor,
+	formatAnchor,
+	lineHasAnchor,
+	parseAnchors,
+} from "./anchor";
 import {
 	getSidecarPath,
 	isSidecarFile,
@@ -71,11 +79,12 @@ export default class MarginNotesPlugin extends Plugin {
 			for (const line of lines) {
 				const m = ANCHOR_RE.exec(line);
 				if (m) {
+					const id = anchorIdFromMatch(m);
 					const t =
 						el.querySelector(
 							"p,h1,h2,h3,h4,h5,h6,li,blockquote"
 						) || el;
-					t.setAttribute("data-ann-id", m[1]);
+					t.setAttribute("data-ann-id", id);
 					t.classList.add("margin-notes-anchored");
 					break;
 				}
@@ -337,13 +346,15 @@ export default class MarginNotesPlugin extends Plugin {
 		const editor = view.editor;
 		const cursor = editor.getCursor();
 		const line = editor.getLine(cursor.line);
-		if (ANCHOR_RE.test(line)) {
+		if (lineHasAnchor(line)) {
 			new Notice("This line already has an annotation");
 			return;
 		}
 
-		const id = generateId();
-		editor.replaceRange(` <!-- ann:${id} -->`, {
+		const existingIds = this.collectExistingIds(editor.getValue());
+		const id = generateId(existingIds);
+		const anchor = formatAnchor(id, this.settings.anchorFormat);
+		editor.replaceRange(anchor, {
 			line: cursor.line,
 			ch: line.length,
 		});
@@ -380,10 +391,12 @@ export default class MarginNotesPlugin extends Plugin {
 
 		const editor = sv.editor;
 		const line = editor.getLine(lineNum - 1); // lineNum is 1-based
-		if (ANCHOR_RE.test(line)) return;
+		if (lineHasAnchor(line)) return;
 
-		const id = generateId();
-		editor.replaceRange(` <!-- ann:${id} -->`, {
+		const existingIds = this.collectExistingIds(editor.getValue());
+		const id = generateId(existingIds);
+		const anchor = formatAnchor(id, this.settings.anchorFormat);
+		editor.replaceRange(anchor, {
 			line: lineNum - 1,
 			ch: line.length,
 		});
@@ -514,6 +527,13 @@ export default class MarginNotesPlugin extends Plugin {
 	}
 
 	// ── Helpers ────────────────────────────────────────────────
+
+	/** Collect all anchor IDs from source text + sidecar for collision check. */
+	private collectExistingIds(sourceText: string): Set<string> {
+		const ids = new Set<string>();
+		for (const a of parseAnchors(sourceText)) ids.add(a.id);
+		return ids;
+	}
 
 	getNotesView(): MarginNotesView | null {
 		const leaves =

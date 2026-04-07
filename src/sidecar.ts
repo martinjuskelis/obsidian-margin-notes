@@ -18,6 +18,9 @@
  *   Another annotation.
  */
 
+import { parseYaml, stringifyYaml } from "obsidian";
+import { ANCHOR_RE, anchorIdFromMatch } from "./anchor";
+
 export interface Annotation {
 	anchorId: string;
 	content: string;
@@ -45,10 +48,17 @@ export function parseSidecar(content: string): SidecarData {
 	// Extract YAML frontmatter
 	const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
 	if (fmMatch) {
-		const fm = fmMatch[1];
+		try {
+			const parsed = parseYaml(fmMatch[1]);
+			if (parsed && typeof parsed.source === "string") {
+				source = parsed.source;
+			}
+		} catch {
+			// Fall back to raw text if YAML is malformed
+			const srcMatch = fmMatch[1].match(/source:\s*"?([^"\n]+)"?/);
+			if (srcMatch) source = srcMatch[1].trim();
+		}
 		body = fmMatch[2];
-		const srcMatch = fm.match(/source:\s*"?([^"\n]+)"?/);
-		if (srcMatch) source = srcMatch[1].trim();
 	}
 
 	const annotations: Annotation[] = [];
@@ -74,10 +84,9 @@ export function sortAnnotationsBySource(
 ): void {
 	const lines = sourceText.split("\n");
 	const anchorOrder = new Map<string, number>();
-	const re = /<!-- ann:(\w+) -->/;
 	for (let i = 0; i < lines.length; i++) {
-		const m = re.exec(lines[i]);
-		if (m) anchorOrder.set(m[1], i);
+		const m = ANCHOR_RE.exec(lines[i]);
+		if (m) anchorOrder.set(anchorIdFromMatch(m), i);
 	}
 	data.annotations.sort((a, b) => {
 		const ai = anchorOrder.get(a.anchorId) ?? Infinity;
@@ -87,7 +96,8 @@ export function sortAnnotationsBySource(
 }
 
 export function serializeSidecar(data: SidecarData): string {
-	let out = `---\nsource: "${data.source}"\n---\n`;
+	const yaml = stringifyYaml({ source: data.source }).trim();
+	let out = `---\n${yaml}\n---\n`;
 	for (const ann of data.annotations) {
 		out += `\n<!-- ann:${ann.anchorId} -->\n\n${ann.content}\n`;
 	}
